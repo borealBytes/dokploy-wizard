@@ -11,103 +11,6 @@ from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.state.models import DesiredState, RawEnvInput, StateValidationError
 
 _ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_OPENCLAW_NEXA_ENV_KEYS = {
-    "OPENCLAW_NEXA_DEPLOYMENT_MODE",
-    "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
-    "OPENCLAW_NEXA_TALK_SHARED_SECRET",
-    "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
-    "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
-    "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
-    "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
-    "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
-    "OPENCLAW_NEXA_AGENT_USER_ID",
-    "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
-    "OPENCLAW_NEXA_AGENT_PASSWORD",
-    "OPENCLAW_NEXA_AGENT_EMAIL",
-    "OPENCLAW_NEXA_MEM0_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_API_KEY",
-    "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
-    "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
-    "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
-    "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
-    "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
-    "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
-    "OPENCLAW_NEXA_PRESENCE_POLICY",
-}
-_MY_FARM_ADVISOR_DIRECT_PROVIDER_ENV_KEYS = {
-    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-}
-_MY_FARM_ADVISOR_SHARED_PROVIDER_ENV_KEYS = {
-    "AI_DEFAULT_API_KEY",
-    "AI_DEFAULT_BASE_URL",
-    "AI_DEFAULT_PROVIDER",
-    "AI_DEFAULT_MODEL",
-    "ANTHROPIC_API_KEY",
-}
-_LITELLM_CANONICAL_ENV_KEYS = {
-    "AI_DEFAULT_PROVIDER",
-    "AI_DEFAULT_MODEL",
-    "LITELLM_IMAGE",
-    "LITELLM_IMAGE_TAG",
-    "LITELLM_VERSION",
-    "LITELLM_ADMIN_SUBDOMAIN",
-    "LITELLM_LOCAL_BASE_URL",
-    "LITELLM_LOCAL_MODEL",
-    "LITELLM_LOCAL_API_KEY",
-    "LITELLM_OPENROUTER_API_KEY",
-    "LITELLM_OPENROUTER_MODELS",
-    "LITELLM_OPENCODE_GO_API_KEY",
-    "LITELLM_NVIDIA_API_KEY",
-    "LITELLM_NVIDIA_BASE_URL",
-    "LITELLM_NVIDIA_MODELS",
-    "LITELLM_MODEL_SYNC_ENABLED",
-    "LITELLM_MODEL_SYNC_INTERVAL_MINUTES",
-    "LITELLM_MODEL_SYNC_PROVIDERS",
-    "LITELLM_MODEL_SYNC_MAX_MODELS",
-    "LITELLM_MODEL_SYNC_NVIDIA_PROBE",
-    "LITELLM_MODEL_SYNC_NVIDIA_MAX_MODELS",
-    "LITELLM_MODEL_SYNC_NVIDIA_FREE_ONLY",
-    "LITELLM_MODEL_SYNC_PROBE_TTL_DAYS",
-    "OPENCODE_GO_API_KEY",
-    "OPENCODE_GO_BASE_URL",
-    "OPENROUTER_API_KEY",
-    "NVIDIA_BASE_URL",
-}
-_LITELLM_LOCAL_ENV_KEYS = {
-    "LITELLM_LOCAL_BASE_URL",
-    "LITELLM_LOCAL_MODEL",
-    "LITELLM_LOCAL_API_KEY",
-}
-_MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS = {
-    "MY_FARM_ADVISOR_PRIMARY_MODEL",
-    "MY_FARM_ADVISOR_FALLBACK_MODELS",
-    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
-}
-_MY_FARM_ADVISOR_FEATURE_GATED_ENV_KEYS = {
-    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-    "TELEGRAM_ALLOWED_USERS",
-    "R2_BUCKET_NAME",
-    "R2_ENDPOINT",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "CF_ACCOUNT_ID",
-    "DATA_MODE",
-    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
-    "WORKSPACE_DATA_R2_PREFIX",
-}
-_MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS = (
-    _MY_FARM_ADVISOR_OPTIONAL_ENV_KEYS | _MY_FARM_ADVISOR_FEATURE_GATED_ENV_KEYS
-)
 
 
 def parse_env_file(path: Path) -> RawEnvInput:
@@ -152,8 +55,6 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
     from dokploy_wizard.packs.resolver import resolve_pack_selection
 
     pack_selection = resolve_pack_selection(values, root_domain=root_domain)
-    _validate_openclaw_nexa_env(values, enabled_packs=pack_selection.enabled_packs)
-    _validate_my_farm_advisor_env(values, enabled_packs=pack_selection.enabled_packs)
     hostnames.update(pack_selection.hostnames)
 
     return DesiredState(
@@ -167,9 +68,9 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         tailscale_enable_ssh=_resolve_tailscale_enable_ssh(values),
         tailscale_tags=_resolve_tailscale_csv(values, key="TAILSCALE_TAGS"),
         tailscale_subnet_routes=_resolve_tailscale_csv(values, key="TAILSCALE_SUBNET_ROUTES"),
-        cloudflare_access_otp_emails=_resolve_access_otp_emails(
-            values, pack_selection.enabled_packs
-        ),
+        cloudflare_access_otp_emails=_resolve_access_otp_emails(values),
+        litellm_model_access_allow_new_users=_resolve_litellm_model_access_flag(values),
+        litellm_model_access_allowed_users=_resolve_litellm_model_access_users(values),
         enabled_features=pack_selection.enabled_features,
         selected_packs=pack_selection.selected_packs,
         enabled_packs=pack_selection.enabled_packs,
@@ -179,18 +80,6 @@ def resolve_desired_state(raw_env: RawEnvInput) -> DesiredState:
         ),
         seaweedfs_secret_key=_resolve_seaweedfs_secret(
             values, enabled_packs=pack_selection.enabled_packs, key="SEAWEEDFS_SECRET_KEY"
-        ),
-        openclaw_gateway_token=_resolve_openclaw_gateway_token(
-            values, enabled_packs=pack_selection.enabled_packs
-        ),
-        openclaw_channels=pack_selection.openclaw_channels,
-        openclaw_replicas=_resolve_openclaw_replicas(values, pack_selection.enabled_packs),
-        my_farm_advisor_channels=pack_selection.my_farm_advisor_channels,
-        my_farm_advisor_replicas=_resolve_pack_replicas(
-            values,
-            pack_selection.enabled_packs,
-            key="MY_FARM_ADVISOR_REPLICAS",
-            pack_name="my-farm-advisor",
         ),
         shared_core=build_shared_core_plan(stack_name, pack_selection.enabled_packs, values),
     )
@@ -248,16 +137,7 @@ def resolve_ai_default_model_ref(values: dict[str, str]) -> str | None:
         if model.startswith(f"{canonical_provider}/"):
             return model
         return f"{canonical_provider}/{model}"
-
-    legacy_provider = _get_configured_value(values, "ADVISOR_MODEL_PROVIDER")
-    legacy_model = _get_configured_value(values, "ADVISOR_MODEL_NAME")
-    if legacy_provider is None and legacy_model is None:
-        return None
-    if legacy_provider is None or legacy_model is None:
-        return None
-    if legacy_model.startswith(f"{legacy_provider}/"):
-        return legacy_model
-    return f"{legacy_provider}/{legacy_model}"
+    return None
 
 
 def parse_litellm_openrouter_models(values: dict[str, str]) -> tuple[tuple[str, str], ...]:
@@ -321,12 +201,6 @@ def _normalize_litellm_nvidia_ref(model_ref: str) -> str:
     return f"nvidia/{model_ref}"
 
 
-def _litellm_nvidia_base_url(values: dict[str, str]) -> str | None:
-    return _get_configured_value(values, "LITELLM_NVIDIA_BASE_URL") or _get_configured_value(
-        values, "NVIDIA_BASE_URL"
-    )
-
-
 def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
     configured_keys = {
         key
@@ -356,16 +230,19 @@ def _validate_litellm_nvidia_env(values: dict[str, str]) -> None:
 
 def _validate_litellm_local_env(values: dict[str, str]) -> None:
     if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
-        missing_local_keys = sorted(
-            key
-            for key in ("LITELLM_LOCAL_MODEL", "LITELLM_LOCAL_API_KEY")
-            if not _has_configured_value(values, key)
-        )
-        if missing_local_keys:
-            joined = ", ".join(missing_local_keys)
+        # The base URL alone is a complete local lane: the autosync sidecar scans
+        # the endpoint's /v1/models and registers every served model by name as
+        # sync/<host-label>-<id>, rescanned each cycle. LITELLM_LOCAL_MODEL only
+        # adds the static alias (local-model.internal/unsloth-active) pinned to
+        # that id, and that deployment carries an api_key, so MODEL and KEY stay
+        # a pair.
+        if _has_configured_value(values, "LITELLM_LOCAL_MODEL") and not _has_configured_value(
+            values, "LITELLM_LOCAL_API_KEY"
+        ):
             raise StateValidationError(
-                "Local LiteLLM routing requires LITELLM_LOCAL_BASE_URL, "
-                f"LITELLM_LOCAL_MODEL, and LITELLM_LOCAL_API_KEY. Missing: {joined}."
+                "The static local LiteLLM alias requires LITELLM_LOCAL_API_KEY alongside "
+                "LITELLM_LOCAL_MODEL. Leave LITELLM_LOCAL_MODEL commented to expose only "
+                "the auto-discovered endpoint models."
             )
         return
     provider = _get_configured_value(values, "AI_DEFAULT_PROVIDER")
@@ -391,12 +268,6 @@ def _canonical_ai_default_provider(provider: str) -> str:
     normalized = provider.strip().lower()
     aliases = {"opencode": "opencode-go"}
     return aliases.get(normalized, normalized)
-
-
-def _litellm_nvidia_configured(values: dict[str, str]) -> bool:
-    return _has_configured_value(values, "LITELLM_NVIDIA_API_KEY") and _litellm_nvidia_base_url(
-        values
-    ) is not None
 
 
 def _resolve_dokploy_api_url(values: dict[str, str]) -> str | None:
@@ -491,15 +362,35 @@ def _parse_bool(raw_value: str, *, key: str) -> bool:
     raise StateValidationError(f"Invalid boolean value for '{key}': {raw_value!r}.")
 
 
-def _resolve_access_otp_emails(
-    values: dict[str, str], enabled_packs: tuple[str, ...]
-) -> tuple[str, ...]:
+def _resolve_litellm_model_access_flag(values: dict[str, str]) -> bool:
+    # Opt-in by default: a brand-new Coder user's workspace key is minted
+    # against the operator's LiteLLM models only when the operator opens the
+    # flag or names that login in ALLOWED_LITELLM_ADDITIONAL_USERS (the seeded
+    # admin is always exempt). Empty counts as unset, like every other key.
+    raw_value = _get_configured_value(values, "ALLOW_LITELLM_MODELS_FOR_NEW_USERS")
+    if raw_value is None:
+        return False
+    return _parse_bool(raw_value, key="ALLOW_LITELLM_MODELS_FOR_NEW_USERS")
+
+
+def _resolve_litellm_model_access_users(values: dict[str, str]) -> tuple[str, ...]:
+    # Coder logins are lowercase by derivation, so the allowlist normalizes
+    # case, trims entries, drops duplicates, and sorts: the same input always
+    # resolves to the same desired-state tuple and fingerprint.
+    raw_value = _get_configured_value(values, "ALLOWED_LITELLM_ADDITIONAL_USERS") or ""
+    users = {item.strip().lower() for item in raw_value.split(",") if item.strip()}
+    return tuple(sorted(users))
+
+
+def _resolve_access_otp_emails(values: dict[str, str]) -> tuple[str, ...]:
     raw_value = _get_configured_value(values, "CLOUDFLARE_ACCESS_OTP_EMAILS") or ""
     if raw_value == "":
-        if {"openclaw", "my-farm-advisor"} & set(enabled_packs):
-            admin_email = values.get("DOKPLOY_ADMIN_EMAIL", "").strip().lower()
-            if admin_email != "" and "@" in admin_email:
-                return (admin_email,)
+        # Access OTP is opt-in. Every public surface the wizard ships today
+        # (Dokploy, Coder, Moodle, DocuSeal, the LiteLLM admin UI)
+        # sits behind its own application login, so wrapping them in Cloudflare
+        # Access would only add a second, weaker identity gate. Operators who
+        # want the extra layer for a future unauthenticated surface list their
+        # emails here and the cloudflare_access phase takes over.
         return ()
     items = tuple(sorted({item.strip().lower() for item in raw_value.split(",") if item.strip()}))
     invalid = [item for item in items if "@" not in item]
@@ -519,141 +410,3 @@ def _resolve_seaweedfs_secret(
             raise StateValidationError(f"{key} requires the 'seaweedfs' pack.")
         return None
     return raw_value
-
-
-def _resolve_openclaw_replicas(
-    values: dict[str, str], enabled_packs: tuple[str, ...]
-) -> int | None:
-    return _resolve_pack_replicas(
-        values,
-        enabled_packs,
-        key="OPENCLAW_REPLICAS",
-        pack_name="openclaw",
-    )
-
-
-def _resolve_pack_replicas(
-    values: dict[str, str], enabled_packs: tuple[str, ...], *, key: str, pack_name: str
-) -> int | None:
-    raw_value = _get_configured_value(values, key)
-    if pack_name not in enabled_packs:
-        if raw_value is not None:
-            raise StateValidationError(f"{key} requires the '{pack_name}' pack.")
-        return None
-    if raw_value is None:
-        return 1
-    try:
-        parsed = int(raw_value)
-    except ValueError as error:
-        raise StateValidationError(
-            f"OPENCLAW_REPLICAS must be a positive integer, found {raw_value!r}."
-        ) from error
-    if parsed < 1:
-        raise StateValidationError(
-            f"OPENCLAW_REPLICAS must be a positive integer, found {raw_value!r}."
-        )
-    return parsed
-
-
-def _resolve_openclaw_gateway_token(
-    values: dict[str, str], *, enabled_packs: tuple[str, ...]
-) -> str | None:
-    raw_value = _get_configured_value(values, "OPENCLAW_GATEWAY_TOKEN")
-    if "openclaw" not in enabled_packs:
-        if raw_value is not None:
-            raise StateValidationError("OPENCLAW_GATEWAY_TOKEN requires the 'openclaw' pack.")
-        return None
-    return raw_value
-
-
-def _validate_openclaw_nexa_env(
-    values: dict[str, str], *, enabled_packs: tuple[str, ...]
-) -> None:
-    if "openclaw" in enabled_packs:
-        return
-    unexpected = sorted(key for key in _OPENCLAW_NEXA_ENV_KEYS if _has_configured_value(values, key))
-    if unexpected:
-        raise StateValidationError(f"{unexpected} require the 'openclaw' pack.")
-
-
-def _validate_my_farm_advisor_env(
-    values: dict[str, str], *, enabled_packs: tuple[str, ...]
-) -> None:
-    if "my-farm-advisor" not in enabled_packs:
-        unexpected = sorted(
-            key for key in _MY_FARM_ADVISOR_PACK_ONLY_ENV_KEYS if _has_configured_value(values, key)
-        )
-        if unexpected:
-            raise StateValidationError(f"{unexpected} require the 'my-farm-advisor' pack.")
-        return
-
-    if any(_has_configured_value(values, key) for key in _MY_FARM_ADVISOR_DIRECT_PROVIDER_ENV_KEYS):
-        return
-    if _has_configured_value(values, "ANTHROPIC_API_KEY"):
-        return
-
-    has_shared_api_key = _has_configured_value(values, "AI_DEFAULT_API_KEY")
-    has_shared_base_url = _has_configured_value(values, "AI_DEFAULT_BASE_URL")
-    if has_shared_api_key and has_shared_base_url:
-        return
-    if has_shared_api_key or has_shared_base_url:
-        raise StateValidationError(
-            "My Farm Advisor shared provider fallback requires both AI_DEFAULT_API_KEY and "
-            "AI_DEFAULT_BASE_URL. Empty strings count as unset."
-        )
-
-    ai_default_model_ref = resolve_ai_default_model_ref(values)
-    if ai_default_model_ref is not None:
-        if not ai_default_model_ref.startswith("nvidia/"):
-            return
-        if _litellm_nvidia_configured(values):
-            return
-
-    has_legacy_opencode_go_api_key = _has_configured_value(values, "OPENCODE_GO_API_KEY")
-    has_legacy_opencode_go_base_url = _has_configured_value(values, "OPENCODE_GO_BASE_URL")
-    if has_legacy_opencode_go_api_key and has_legacy_opencode_go_base_url:
-        return
-    if has_legacy_opencode_go_api_key or has_legacy_opencode_go_base_url:
-        raise StateValidationError(
-            "LiteLLM OpenCode Go compatibility requires both OPENCODE_GO_API_KEY and "
-            "OPENCODE_GO_BASE_URL. Empty strings count as unset."
-        )
-
-    openrouter_models = parse_litellm_openrouter_models(values)
-    has_litellm_openrouter_api_key = _has_configured_value(values, "LITELLM_OPENROUTER_API_KEY")
-    if has_litellm_openrouter_api_key and openrouter_models:
-        return
-    if has_litellm_openrouter_api_key and not openrouter_models:
-        raise StateValidationError(
-            "LiteLLM OpenRouter routing for My Farm Advisor requires both "
-            "LITELLM_OPENROUTER_API_KEY and LITELLM_OPENROUTER_MODELS. Empty strings count "
-            "as unset."
-        )
-
-    if _has_configured_value(values, "LITELLM_OPENCODE_GO_API_KEY"):
-        return
-
-    if _litellm_nvidia_configured(values):
-        return
-
-    if _has_configured_value(values, "LITELLM_LOCAL_BASE_URL"):
-        return
-    if _has_configured_value(values, "LITELLM_LOCAL_MODEL") or any(
-        _has_configured_value(values, key) for key in _LITELLM_LOCAL_ENV_KEYS
-    ):
-        raise StateValidationError(
-            "LiteLLM canonical local mode for My Farm Advisor requires LITELLM_LOCAL_BASE_URL. "
-            "Point it at the reachable Tailnet/local vLLM endpoint. Empty strings count as unset."
-        )
-
-    raise StateValidationError(
-        "My Farm Advisor requires at least one provider configuration when enabled. Set "
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY, MY_FARM_ADVISOR_NVIDIA_API_KEY, "
-        "ANTHROPIC_API_KEY, both AI_DEFAULT_API_KEY and AI_DEFAULT_BASE_URL, both "
-        "AI_DEFAULT_PROVIDER and AI_DEFAULT_MODEL, both OPENCODE_GO_API_KEY and "
-        "OPENCODE_GO_BASE_URL, LITELLM_OPENROUTER_API_KEY with LITELLM_OPENROUTER_MODELS, "
-        "LITELLM_OPENCODE_GO_API_KEY, LITELLM_NVIDIA_API_KEY with "
-        "LITELLM_NVIDIA_BASE_URL, or LITELLM_LOCAL_BASE_URL "
-        "for LiteLLM canonical local "
-        "mode. Empty strings count as unset."
-    )

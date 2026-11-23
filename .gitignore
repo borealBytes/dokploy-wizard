@@ -33,3 +33,8 @@ dist/
 .fresh-vps-validation.env
 .gstack/
 *.bak
+
+# Screenshot studio: raw captures, browser states, and the real redaction
+# config stay local; only redacted finals under screenshots/<area>/ commit.
+screenshots/raw/
+screenshots/redact.env

@@ -15,7 +15,11 @@ from dokploy_wizard import cli
 from dokploy_wizard.packs.catalog import get_mutable_pack_env_keys, get_pack_definition
 from dokploy_wizard.packs.resolver import resolve_pack_selection
 from dokploy_wizard.state import resolve_desired_state
-from dokploy_wizard.state.models import RawEnvInput, StateValidationError
+from dokploy_wizard.state.models import (
+    DesiredState,
+    RawEnvInput,
+    StateValidationError,
+)
 
 _ALWAYS_REQUIRED_KEYS = frozenset({"ROOT_DOMAIN"})
 _LIVE_BOOTSTRAP_REQUIRED_KEYS = frozenset(
@@ -31,8 +35,6 @@ _ENABLED_FEATURE_REQUIRED_KEYS = frozenset({"TAILSCALE_AUTH_KEY", "TAILSCALE_HOS
 _GENERATED_STATE_BACKED_KEYS = frozenset(
     {
         "DOKPLOY_API_KEY",
-        "OPENCLAW_GATEWAY_PASSWORD",
-        "OPENCLAW_GATEWAY_TOKEN",
         "SEAWEEDFS_ACCESS_KEY",
         "SEAWEEDFS_SECRET_KEY",
     }
@@ -41,12 +43,12 @@ _DEFAULTED_KEYS = frozenset(
     {
         "AI_DEFAULT_PROVIDER",
         "AI_DEFAULT_MODEL",
+        "ALLOW_LITELLM_MODELS_FOR_NEW_USERS",
         "STACK_NAME",
         "DOKPLOY_SUBDOMAIN",
         "LITELLM_ADMIN_SUBDOMAIN",
-        "NEXTCLOUD_SUBDOMAIN",
-        "ONLYOFFICE_SUBDOMAIN",
-        "MY_FARM_ADVISOR_CHANNELS",
+        "MATRIX_SUBDOMAIN",
+        "MOODLE_SUBDOMAIN",
     }
 )
 _OPTIONAL_COMMENTED_KEYS = frozenset(
@@ -56,13 +58,6 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "ENABLE_TAILSCALE",
         "TAILSCALE_AUTH_KEY",
         "TAILSCALE_HOSTNAME",
-        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-        "R2_BUCKET_NAME",
-        "R2_ENDPOINT",
-        "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY",
-        "CF_ACCOUNT_ID",
         "LITELLM_LOCAL_BASE_URL",
         "LITELLM_LOCAL_MODEL",
         "LITELLM_LOCAL_API_KEY",
@@ -71,6 +66,7 @@ _OPTIONAL_COMMENTED_KEYS = frozenset(
         "LITELLM_OPENROUTER_MODELS",
         "LITELLM_ADMIN_SUBDOMAIN",
         "CLOUDFLARE_ACCESS_OTP_EMAILS",
+        "ALLOWED_LITELLM_ADDITIONAL_USERS",
     }
 )
 _DEFAULT_AI_PROVIDER = "opencode-go"
@@ -130,16 +126,16 @@ def _load_active_env_keys(relative_path: str) -> frozenset[str]:
 def _minimal_env(**overrides: str) -> RawEnvInput:
     values = {
         "ROOT_DOMAIN": "example.test",
-        "PACKS": "nextcloud,coder",
+        "PACKS": "moodle,coder",
     }
     values.update(overrides)
     return RawEnvInput(format_version=1, values=values)
 
 
-def _farm_litellm_env(**overrides: str) -> RawEnvInput:
+def _litellm_env(**overrides: str) -> RawEnvInput:
     values = {
         "ROOT_DOMAIN": "example.com",
-        "PACKS": "my-farm-advisor",
+        "PACKS": "coder",
         "LITELLM_IMAGE": "ghcr.io/berriai/litellm",
         "LITELLM_IMAGE_TAG": "main-v1.40.14-stable",
         "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
@@ -152,7 +148,6 @@ def _farm_litellm_env(**overrides: str) -> RawEnvInput:
             "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
             "openrouter/healer-alpha=openrouter/anthropic/claude-3.5-sonnet"
         ),
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
         "LITELLM_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     }
     values.update(overrides)
@@ -191,9 +186,10 @@ def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> No
     install_min_keys, _model_shape, safe_values = _load_install_min_env_shape()
     active_packs = safe_values["PACKS"].split(",")
     # The minimal class-proof stack is Coder plus the shared services it needs
-    # and SeaweedFS object storage; heavier packs stay opt-in.
-    required_proof_packs = ["seaweedfs", "coder"]
-    optional_proof_packs = {"surfsense", "nextcloud", "my-farm-advisor"}
+    # and SeaweedFS object storage, with Gitea riding that same storage layer
+    # (no new service class of its own); heavier packs stay opt-in.
+    required_proof_packs = ["seaweedfs", "coder", "gitea"]
+    optional_proof_packs: set[str] = set()
 
     assert active_packs[: len(required_proof_packs)] == required_proof_packs
     assert len(active_packs) == len(set(active_packs))
@@ -201,28 +197,26 @@ def test_install_min_env_safe_shape_matches_minimized_remote_proof_stack() -> No
     assert safe_values["AI_DEFAULT_PROVIDER"] == _DEFAULT_AI_PROVIDER
     assert safe_values["AI_DEFAULT_MODEL"] == _DEFAULT_AI_MODEL
     assert _GENERATED_STATE_BACKED_KEYS.isdisjoint(install_min_keys)
-    assert "MY_FARM_ADVISOR_CHANNELS" not in install_min_keys
 
 
 def test_minimal_env_uses_packs_for_enablement_and_defaults_optional_hostnames() -> None:
-    raw_env = _minimal_env(PACKS="nextcloud,coder")
+    raw_env = _minimal_env(PACKS="moodle,coder")
     selection = resolve_pack_selection(raw_env.values, root_domain=raw_env.values["ROOT_DOMAIN"])
     desired_state = resolve_desired_state(raw_env)
 
-    assert "ENABLE_NEXTCLOUD" not in raw_env.values
+    assert "ENABLE_MOODLE" not in raw_env.values
     assert "ENABLE_CODER" not in raw_env.values
     assert "STACK_NAME" not in raw_env.values
     assert "DOKPLOY_SUBDOMAIN" not in raw_env.values
-    assert selection.selected_packs == ("coder", "nextcloud")
+    assert selection.selected_packs == ("coder", "moodle")
     assert desired_state.stack_name == "example-test"
     assert desired_state.shared_core.network_name == "example-test-shared"
-    assert desired_state.enabled_packs == ("coder", "nextcloud")
+    assert desired_state.enabled_packs == ("coder", "moodle")
     assert desired_state.enable_tailscale is False
     assert desired_state.tailscale_hostname is None
     assert desired_state.hostnames["coder"] == "coder.example.test"
     assert desired_state.hostnames["coder-wildcard"] == "*.example.test"
-    assert desired_state.hostnames["nextcloud"] == "nextcloud.example.test"
-    assert desired_state.hostnames["onlyoffice"] == "office.example.test"
+    assert desired_state.hostnames["moodle"] == "moodle.example.test"
     assert desired_state.hostnames["dokploy"] == "dokploy.example.test"
 
 
@@ -245,86 +239,112 @@ def test_stack_name_defaults_from_root_domain_and_preserves_explicit_override() 
 
 
 def test_subdomain_defaults_are_optional_and_overrides_are_honored() -> None:
-    default_state = resolve_desired_state(_farm_litellm_env())
+    default_state = resolve_desired_state(_litellm_env())
     override_state = resolve_desired_state(
-        _farm_litellm_env(
+        _litellm_env(
             DOKPLOY_SUBDOMAIN="control",
-            MY_FARM_ADVISOR_SUBDOMAIN="advisor",
+            CODER_SUBDOMAIN="dev",
         )
     )
 
     assert default_state.hostnames["dokploy"] == "dokploy.example.com"
     assert default_state.dokploy_url == "https://dokploy.example.com"
-    assert default_state.hostnames["my-farm-advisor"] == "farm.example.com"
+    assert default_state.hostnames["coder"] == "coder.example.com"
     assert override_state.hostnames["dokploy"] == "control.example.com"
     assert override_state.dokploy_url == "https://control.example.com"
-    assert override_state.hostnames["my-farm-advisor"] == "advisor.example.com"
+    assert override_state.hostnames["coder"] == "dev.example.com"
 
 
-def test_cloudflare_access_otp_emails_do_not_require_the_advisor_packs() -> None:
-    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The key
-    # used to be rejected outright when no advisor pack was installed, which left the
-    # admin UI as the one public hostname nobody could put in front of a sign-in page.
+def test_cloudflare_access_otp_emails_are_opt_in_and_always_honored() -> None:
+    # Access also gates the LiteLLM admin hostname, so any stack can ask for it. The
+    # recipient list is purely opt-in now: every shipped surface has its own
+    # application login, and the wizard no longer invents a policy from the admin
+    # email behind the operator's back.
     explicit = resolve_desired_state(
-        _farm_litellm_env(
+        _litellm_env(
             PACKS="seaweedfs,coder",
             CLOUDFLARE_ACCESS_OTP_EMAILS="owner@example.com",
         )
     )
     assert explicit.cloudflare_access_otp_emails == ("owner@example.com",)
 
-    # The implicit default from the stack admin email stays with the advisor packs.
-    implicit = resolve_desired_state(
-        _farm_litellm_env(DOKPLOY_ADMIN_EMAIL="owner@example.com")
+    opted_out = resolve_desired_state(
+        _litellm_env(DOKPLOY_ADMIN_EMAIL="owner@example.com")
     )
-    assert implicit.cloudflare_access_otp_emails == ("owner@example.com",)
+    assert opted_out.cloudflare_access_otp_emails == ()
     quiet = resolve_desired_state(
-        _farm_litellm_env(
+        _litellm_env(
             PACKS="seaweedfs,coder",
             DOKPLOY_ADMIN_EMAIL="owner@example.com",
+            LITELLM_ADMIN_SUBDOMAIN="",
         )
     )
     assert quiet.cloudflare_access_otp_emails == ()
 
 
+def test_litellm_model_access_policy_defaults_to_deny_with_normalized_allowlist() -> None:
+    # Brand-new Coder users see the operator's LiteLLM models only when the
+    # operator opens the flag or names their login in the allowlist (the
+    # seeded admin is always exempt — that exemption is derived at apply time
+    # from the admin email, not carried in the state).
+    default_state = resolve_desired_state(_minimal_env())
+    assert default_state.litellm_model_access_allow_new_users is False
+    assert default_state.litellm_model_access_allowed_users == ()
+
+    blank = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS=""))
+    assert blank.litellm_model_access_allow_new_users is False
+
+    granted = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="TRUE"))
+    assert granted.litellm_model_access_allow_new_users is True
+
+    denied = resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="FALSE"))
+    assert denied.litellm_model_access_allow_new_users is False
+
+    with pytest.raises(StateValidationError):
+        resolve_desired_state(_minimal_env(ALLOW_LITELLM_MODELS_FOR_NEW_USERS="maybe"))
+
+    # Coder logins are lowercase by derivation, so the allowlist normalizes
+    # case, trims, dedupes, and sorts: the same intent always resolves to the
+    # same desired-state tuple and fingerprint.
+    allowlisted = resolve_desired_state(
+        _minimal_env(ALLOWED_LITELLM_ADDITIONAL_USERS=" Bob ,alice,BOB,, jo-ho ")
+    )
+    assert allowlisted.litellm_model_access_allowed_users == ("alice", "bob", "jo-ho")
+
+
+def test_pre_policy_desired_state_docs_load_with_model_access_defaults() -> None:
+    # On-box state docs predate the policy feature: the fields are optional on
+    # load (flag false, empty allowlist), so a wizard upgrade never strands an
+    # existing stack and the reloaded doc fingerprints identically.
+    payload = resolve_desired_state(_minimal_env()).to_dict()
+    del payload["litellm_model_access_allow_new_users"]
+    del payload["litellm_model_access_allowed_users"]
+
+    legacy = DesiredState.from_dict(payload)
+
+    assert legacy.litellm_model_access_allow_new_users is False
+    assert legacy.litellm_model_access_allowed_users == ()
+    assert legacy.fingerprint() == resolve_desired_state(_minimal_env()).fingerprint()
+
+
 def test_public_examples_do_not_make_default_subdomains_active_inputs() -> None:
-    for relative_path in (".install.env.example", ".install-my-farm-advisor.env.example"):
+    for relative_path in (".install.env.example", ".install-min.env.example"):
         active_keys = _load_active_env_keys(relative_path)
         assert "STACK_NAME" not in active_keys
         assert "DOKPLOY_SUBDOMAIN" not in active_keys
-        assert "MY_FARM_ADVISOR_SUBDOMAIN" not in active_keys
-        assert "MY_FARM_ADVISOR_CHANNELS" not in active_keys
-
-
-@pytest.mark.parametrize(
-    "channel_overrides",
-    [
-        {},
-        {"MY_FARM_ADVISOR_CHANNELS": ""},
-        {"MY_FARM_ADVISOR_CHANNELS": " , "},
-    ],
-)
-def test_my_farm_advisor_channels_default_when_omitted_or_blank(
-    channel_overrides: dict[str, str],
-) -> None:
-    raw_env = _farm_litellm_env(**channel_overrides)
-    selection = resolve_pack_selection(raw_env.values, root_domain=raw_env.values["ROOT_DOMAIN"])
-    desired_state = resolve_desired_state(raw_env)
-
-    assert "my-farm-advisor" in desired_state.enabled_packs
-    assert selection.my_farm_advisor_channels == ("telegram",)
-    assert desired_state.my_farm_advisor_channels == ("telegram",)
+        assert "CODER_SUBDOMAIN" not in active_keys
+        assert "CODER_WILDCARD_SUBDOMAIN" not in active_keys
 
 
 def test_omitted_optional_integrations_pass_when_features_are_disabled_or_unconfigured() -> None:
-    raw_env = _minimal_env(PACKS="nextcloud,coder")
+    raw_env = _minimal_env(PACKS="moodle,coder")
     desired_state = resolve_desired_state(raw_env)
 
     assert cli._docker_hub_credentials_from_env(raw_env) is None
     assert desired_state.enable_tailscale is False
     assert desired_state.tailscale_tags == ()
     assert desired_state.tailscale_subnet_routes == ()
-    assert "my-farm-advisor" not in desired_state.enabled_packs
+    assert "docuseal" not in desired_state.enabled_packs
     assert "LITELLM_LOCAL_BASE_URL" not in raw_env.values
     assert "LITELLM_NVIDIA_API_KEY" not in raw_env.values
     assert _OPTIONAL_COMMENTED_KEYS.isdisjoint(raw_env.values)
@@ -432,39 +452,32 @@ def test_dokploy_admin_password_is_required_when_email_is_set_for_real_bootstrap
 
 def test_litellm_canonical_env_validates_without_direct_consumer_provider_keys() -> None:
     desired_state = resolve_desired_state(
-        _farm_litellm_env(
-            MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-            MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-            ANTHROPIC_API_KEY="",
+        _litellm_env(
             AI_DEFAULT_API_KEY="",
             AI_DEFAULT_BASE_URL="",
         )
     )
 
-    assert "my-farm-advisor" in desired_state.enabled_packs
+    assert "coder" in desired_state.enabled_packs
 
 
-def test_my_farm_advisor_can_be_enabled_by_packs_without_duplicate_flag() -> None:
-    raw_env = _farm_litellm_env()
+def test_coder_can_be_enabled_by_packs_without_duplicate_flag() -> None:
+    raw_env = _litellm_env()
     desired_state = resolve_desired_state(raw_env)
 
-    assert raw_env.values["PACKS"] == "my-farm-advisor"
-    assert "ENABLE_MY_FARM_ADVISOR" not in raw_env.values
-    assert "MY_FARM_ADVISOR_SUBDOMAIN" not in raw_env.values
-    assert "MY_FARM_ADVISOR_CHANNELS" not in raw_env.values
-    assert desired_state.selected_packs == ("my-farm-advisor",)
-    assert desired_state.enabled_packs == ("my-farm-advisor",)
-    assert desired_state.hostnames["my-farm-advisor"] == "farm.example.com"
-    assert desired_state.my_farm_advisor_channels == ("telegram",)
+    assert raw_env.values["PACKS"] == "coder"
+    assert "ENABLE_CODER" not in raw_env.values
+    assert "CODER_SUBDOMAIN" not in raw_env.values
+    assert desired_state.selected_packs == ("coder",)
+    assert desired_state.enabled_packs == ("coder",)
+    assert desired_state.hostnames["coder"] == "coder.example.com"
+    assert desired_state.hostnames["coder-wildcard"] == "*.example.com"
 
 
 def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_error() -> None:
     with pytest.raises(StateValidationError, match="LITELLM_LOCAL_BASE_URL"):
         resolve_desired_state(
-            _farm_litellm_env(
-                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-                ANTHROPIC_API_KEY="",
+            _litellm_env(
                 AI_DEFAULT_API_KEY="",
                 AI_DEFAULT_BASE_URL="",
                 LITELLM_LOCAL_BASE_URL="",
@@ -474,11 +487,38 @@ def test_litellm_canonical_env_rejects_missing_local_endpoint_with_actionable_er
         )
 
 
+def test_local_base_url_alone_is_a_complete_local_lane() -> None:
+    # Autosync discovers whatever the endpoint serves; MODEL and KEY are only
+    # needed for the static pinned alias, so URL-only must validate clean.
+    raw_env = _litellm_env(
+        LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="",
+    )
+
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
+
+
+def test_local_static_alias_requires_its_key_but_key_needs_no_model() -> None:
+    with pytest.raises(StateValidationError, match="LITELLM_LOCAL_API_KEY"):
+        resolve_desired_state(
+            _litellm_env(
+                LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+                LITELLM_LOCAL_MODEL="unsloth-active",
+                LITELLM_LOCAL_API_KEY="",
+            )
+        )
+
+    keyless_of_model = _litellm_env(
+        LITELLM_LOCAL_BASE_URL="http://tuxdesktop.felis-aeolian.ts.net:30000/v1",
+        LITELLM_LOCAL_MODEL="",
+        LITELLM_LOCAL_API_KEY="sk-no-key-required",
+    )
+    assert "coder" in resolve_desired_state(keyless_of_model).enabled_packs
+
+
 def test_ai_default_provider_and_model_resolve_local_alias_but_requires_local_base_url() -> None:
-    raw_env = _farm_litellm_env(
-        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-        ANTHROPIC_API_KEY="",
+    raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
@@ -494,10 +534,7 @@ def test_ai_default_provider_and_model_resolve_local_alias_but_requires_local_ba
 
 
 def test_ai_default_provider_and_model_resolve_opencode_alias() -> None:
-    raw_env = _farm_litellm_env(
-        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-        ANTHROPIC_API_KEY="",
+    raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
@@ -510,14 +547,11 @@ def test_ai_default_provider_and_model_resolve_opencode_alias() -> None:
     assert env_module.resolve_ai_default_model_ref(raw_env.values) == (
         "opencode-go/minimax/minimax-m2.5:free"
     )
-    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
 
 
 def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
-    raw_env = _farm_litellm_env(
-        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-        ANTHROPIC_API_KEY="",
+    raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
@@ -542,14 +576,11 @@ def test_litellm_openrouter_models_accept_raw_openrouter_model_ids() -> None:
             "openrouter/anthropic/claude-3.5-sonnet",
         ),
     )
-    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
 
 
 def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
-    raw_env = _farm_litellm_env(
-        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-        ANTHROPIC_API_KEY="",
+    raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
@@ -577,14 +608,11 @@ def test_litellm_nvidia_models_accept_user_style_raw_model_ids() -> None:
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
         ),
     )
-    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
 
 
 def test_litellm_nvidia_env_is_valid_without_manual_model_list() -> None:
-    raw_env = _farm_litellm_env(
-        MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-        MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-        ANTHROPIC_API_KEY="",
+    raw_env = _litellm_env(
         AI_DEFAULT_API_KEY="",
         AI_DEFAULT_BASE_URL="",
         LITELLM_LOCAL_BASE_URL="",
@@ -598,13 +626,13 @@ def test_litellm_nvidia_env_is_valid_without_manual_model_list() -> None:
     )
 
     assert env_module.parse_litellm_nvidia_models(raw_env.values) == ()
-    assert "my-farm-advisor" in resolve_desired_state(raw_env).enabled_packs
+    assert "coder" in resolve_desired_state(raw_env).enabled_packs
 
 
 def test_litellm_nvidia_routing_without_base_url_raises() -> None:
     with pytest.raises(StateValidationError, match="LITELLM_NVIDIA_BASE_URL"):
         resolve_desired_state(
-            _farm_litellm_env(
+            _litellm_env(
                 LITELLM_NVIDIA_API_KEY="fake-nvidia-key",
                 LITELLM_NVIDIA_BASE_URL="",
                 LITELLM_NVIDIA_MODELS="",
@@ -615,10 +643,7 @@ def test_litellm_nvidia_routing_without_base_url_raises() -> None:
 def test_ai_default_provider_requires_model_name() -> None:
     with pytest.raises(StateValidationError, match="AI_DEFAULT_MODEL"):
         resolve_desired_state(
-            _farm_litellm_env(
-                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-                ANTHROPIC_API_KEY="",
+            _litellm_env(
                 AI_DEFAULT_API_KEY="",
                 AI_DEFAULT_BASE_URL="",
                 LITELLM_LOCAL_BASE_URL="",
@@ -631,10 +656,7 @@ def test_ai_default_provider_requires_model_name() -> None:
 def test_ai_default_model_requires_provider_name() -> None:
     with pytest.raises(StateValidationError, match="AI_DEFAULT_PROVIDER"):
         resolve_desired_state(
-            _farm_litellm_env(
-                MY_FARM_ADVISOR_OPENROUTER_API_KEY="",
-                MY_FARM_ADVISOR_NVIDIA_API_KEY="",
-                ANTHROPIC_API_KEY="",
+            _litellm_env(
                 AI_DEFAULT_API_KEY="",
                 AI_DEFAULT_BASE_URL="",
                 LITELLM_LOCAL_BASE_URL="",
@@ -662,7 +684,7 @@ def test_new_ai_contract_keys_are_mutable_and_sensitive() -> None:
     assert redacted.values["LITELLM_OPENROUTER_API_KEY"] == "<redacted>"
     assert redacted.values["LITELLM_OPENCODE_GO_API_KEY"] == "<redacted>"
     assert "AI_DEFAULT_PROVIDER" in get_pack_definition("coder").mutable_env_keys
-    assert "AI_DEFAULT_MODEL" in get_pack_definition("openclaw").mutable_env_keys
+    assert "AI_DEFAULT_MODEL" in get_pack_definition("coder").mutable_env_keys
     assert {
         "AI_DEFAULT_PROVIDER",
         "AI_DEFAULT_MODEL",
@@ -680,7 +702,8 @@ def test_new_ai_contract_keys_are_mutable_and_sensitive() -> None:
         "AI_DEFAULT_MODEL",
         "LITELLM_OPENROUTER_API_KEY",
         "LITELLM_OPENCODE_GO_API_KEY",
-    } <= change_module._LITELLM_MUTABLE_ENV_KEYS
+    } <= change_module._LITELLM_SHARED_CONFIG_ENV_KEYS
+    assert change_module._LITELLM_CONSUMER_PHASES == {"coder"}
 
 
 def test_readme_documents_litellm_core_gateway_contract() -> None:

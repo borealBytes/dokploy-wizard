@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -20,15 +21,10 @@ from dokploy_wizard.networking import (
 )
 from dokploy_wizard.packs.coder import CoderResourceRecord
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudBundleVerification,
-    NextcloudCommandCheck,
-    NextcloudResourceRecord,
-    TalkRuntime,
-)
-from dokploy_wizard.packs.openclaw import OpenClawResourceRecord
+from dokploy_wizard.packs.moodle import MoodleResourceRecord
 from dokploy_wizard.preflight import HostFacts, PreflightCheck, PreflightReport, ResourceProfile
-from dokploy_wizard.state import load_state_dir
+from dokploy_wizard.state import OwnedResource, load_state_dir
+from tests.integration.test_matrix_pack import FakeMatrixBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -52,6 +48,9 @@ class FakeDokployBackend:
 class FakeCoderBackend:
     existing_service: CoderResourceRecord | None = None
     existing_data: CoderResourceRecord | None = None
+    # Protocol member the engine harvests after the coder apply; the fake
+    # installs no host units.
+    apply_time_owned_resources: tuple[OwnedResource, ...] = ()
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         if self.existing_service is not None and self.existing_service.resource_id == resource_id:
@@ -183,6 +182,12 @@ class FakeCloudflareBackend:
         )
         self.dns_records[hostname] = record
         return record
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         return tuple(self.certificate_packs.values())
@@ -320,168 +325,6 @@ class FakeHeadscaleBackend:
         return True
 
 
-@dataclass
-class FakeNextcloudBackend:
-    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-
-    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.services.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.services.get(resource_name)
-
-    def create_service(
-        self,
-        *,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del hostname, data_volume_name, config
-        record = NextcloudResourceRecord(
-            resource_id=f"service:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.services[resource_name] = record
-        return record
-
-    def update_service(
-        self,
-        *,
-        resource_id: str,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del resource_id
-        return self.create_service(
-            resource_name=resource_name,
-            hostname=hostname,
-            data_volume_name=data_volume_name,
-            config=config,
-        )
-
-    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.volumes.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.volumes.get(resource_name)
-
-    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
-        record = NextcloudResourceRecord(
-            resource_id=f"volume:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.volumes[resource_name] = record
-        return record
-
-    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
-        del service, url
-        return True
-
-    def ensure_application_ready(
-        self, *, nextcloud_url: str, onlyoffice_url: str
-    ) -> NextcloudBundleVerification:
-        del nextcloud_url, onlyoffice_url
-        return NextcloudBundleVerification(
-            onlyoffice_document_server_check=NextcloudCommandCheck(
-                command="php occ onlyoffice:documentserver --check",
-                passed=True,
-            ),
-            talk=TalkRuntime(
-                app_id="spreed",
-                enabled=True,
-                enabled_check=NextcloudCommandCheck(
-                    command="php occ app:list --output=json",
-                    passed=True,
-                ),
-                signaling_check=NextcloudCommandCheck(
-                    command="php occ talk:signaling:list --output=json",
-                    passed=True,
-                ),
-                stun_check=NextcloudCommandCheck(
-                    command="php occ talk:stun:list --output=json",
-                    passed=True,
-                ),
-                turn_check=NextcloudCommandCheck(
-                    command="php occ talk:turn:list --output=json",
-                    passed=True,
-                ),
-            ),
-        )
-
-    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        del admin_user
-
-
-@dataclass
-class FakeOpenClawBackend:
-    existing_service: OpenClawResourceRecord | None = None
-
-    def get_service(self, resource_id: str) -> OpenClawResourceRecord | None:
-        if self.existing_service is not None and self.existing_service.resource_id == resource_id:
-            return self.existing_service
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> OpenClawResourceRecord | None:
-        if (
-            self.existing_service is not None
-            and self.existing_service.resource_name == resource_name
-        ):
-            return self.existing_service
-        return None
-
-    def create_service(
-        self,
-        *,
-        resource_name: str,
-        hostname: str,
-        template_path: object,
-        variant: str,
-        channels: tuple[str, ...],
-        replicas: int,
-        secret_refs: tuple[str, ...],
-    ) -> OpenClawResourceRecord:
-        del hostname, template_path, variant, channels, replicas, secret_refs
-        self.existing_service = OpenClawResourceRecord(
-            resource_id="openclaw-service-1",
-            resource_name=resource_name,
-            replicas=1,
-        )
-        return self.existing_service
-
-    def update_service(
-        self,
-        *,
-        resource_id: str,
-        resource_name: str,
-        hostname: str,
-        template_path: object,
-        variant: str,
-        channels: tuple[str, ...],
-        replicas: int,
-        secret_refs: tuple[str, ...],
-    ) -> OpenClawResourceRecord:
-        del hostname, template_path, variant, channels, replicas, secret_refs
-        self.existing_service = OpenClawResourceRecord(
-            resource_id=resource_id,
-            resource_name=resource_name,
-            replicas=1,
-        )
-        return self.existing_service
-
-    def check_health(self, *, service: OpenClawResourceRecord, url: str) -> bool:
-        del service, url
-        return True
 
 
 def test_install_non_dry_run_reconciles_networking_and_persists_ledger(tmp_path: Path) -> None:
@@ -584,7 +427,7 @@ def test_install_rerun_uses_ledger_owned_networking_resources(tmp_path: Path) ->
     assert second_networking_backend.create_dns_calls == 0
 
 
-def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> None:
+def test_install_applies_access_only_for_the_litellm_admin_hostname(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     env_file = tmp_path / "access.env"
     env_file.write_text(
@@ -593,7 +436,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
                 "STACK_NAME=wizard-stack",
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
-                "ENABLE_OPENCLAW=true",
+                "ENABLE_MATRIX=true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -618,7 +461,7 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
-    nextcloud_backend = FakeNextcloudBackend()
+    matrix_backend = FakeMatrixBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -627,23 +470,22 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=nextcloud_backend,
-        openclaw_backend=FakeOpenClawBackend(),
+        matrix_backend=matrix_backend,
     )
 
     loaded_state = load_state_dir(state_dir)
     assert summary["cloudflare_access"]["outcome"] == "applied"
     assert [item["hostname"] for item in summary["cloudflare_access"]["applications"]] == [
-        "openclaw.example.com",
-        "litellm.example.com",
+        "litellm.example.com"
     ]
     assert loaded_state.applied_state is not None
-    assert loaded_state.applied_state.completed_steps[:5] == (
+    assert loaded_state.applied_state.completed_steps == (
         "preflight",
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "openclaw",
+        "matrix",
+        "cloudflare_access",
     )
     assert loaded_state.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded_state.ownership_ledger.resources} >= {
@@ -653,21 +495,65 @@ def test_install_applies_access_only_for_advisor_hostnames(tmp_path: Path) -> No
     }
 
 
-def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_repo_routing(
+def test_install_keeps_pack_hostnames_out_of_access_while_public_by_dns_routing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _HealthyFakeMoodleBackend:
+        def __init__(self) -> None:
+            self._service: MoodleResourceRecord | None = None
+
+        def get_service(self, resource_id: str) -> MoodleResourceRecord:
+            return MoodleResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+        def find_service_by_name(self, resource_name: str) -> MoodleResourceRecord | None:
+            return self._service
+
+        def create_service(self, *, resource_name: str, **kwargs: object) -> MoodleResourceRecord:
+            self._service = MoodleResourceRecord(
+                resource_id=resource_name, resource_name=resource_name
+            )
+            return self._service
+
+        def update_service(
+            self, *, resource_name: str, **kwargs: object
+        ) -> MoodleResourceRecord:
+            return self.create_service(resource_name=resource_name, **kwargs)
+
+        def get_persistent_data(self, resource_id: str) -> MoodleResourceRecord:
+            return MoodleResourceRecord(resource_id=resource_id, resource_name=resource_id)
+
+        def find_persistent_data_by_name(self, resource_name: str) -> MoodleResourceRecord | None:
+            return self._service
+
+        def create_persistent_data(self, resource_name: str) -> MoodleResourceRecord:
+            self._service = MoodleResourceRecord(
+                resource_id=resource_name, resource_name=resource_name
+            )
+            return self._service
+
+        def check_health(self, *, service: MoodleResourceRecord, url: str) -> bool:
+            return True
+
+        def ensure_application_ready(self) -> tuple[str, ...]:
+            return ()
+
+    monkeypatch.setattr(
+        cli,
+        "_build_moodle_backend",
+        lambda **kwargs: cast(Any, _HealthyFakeMoodleBackend()),
+    )
     state_dir = tmp_path / "state"
-    env_file = tmp_path / "access-nextcloud-farm.env"
+    env_file = tmp_path / "access-matrix-moodle.env"
     env_file.write_text(
         "\n".join(
             [
                 "STACK_NAME=wizard-stack",
                 "ROOT_DOMAIN=example.com",
                 "DOKPLOY_BOOTSTRAP_MOCK_API_KEY=dokp-test-key",
-                "ENABLE_NEXTCLOUD=true",
-                "ENABLE_MY_FARM_ADVISOR=true",
-                "MY_FARM_ADVISOR_CHANNELS=telegram",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY=farm-openrouter-key",
+                "ENABLE_MATRIX=true",
+                "ENABLE_MOODLE=true",
+                "MOODLE_SUBDOMAIN=moodle",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS=owner@example.com,ops@example.com",
                 "HOST_OS_ID=ubuntu",
                 "HOST_OS_VERSION_ID=24.04",
@@ -692,7 +578,7 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         encoding="utf-8",
     )
     backend = FakeCloudflareBackend()
-    nextcloud_backend = FakeNextcloudBackend()
+    matrix_backend = FakeMatrixBackend()
 
     summary = run_install_flow(
         env_file=env_file,
@@ -701,17 +587,17 @@ def test_install_keeps_onlyoffice_out_of_access_while_my_farm_stays_managed_by_r
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=backend,
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=nextcloud_backend,
-        openclaw_backend=FakeOpenClawBackend(),
+        matrix_backend=matrix_backend,
     )
 
     dns_hostnames = [item["hostname"] for item in summary["networking"]["dns_records"]]
     access_hostnames = [item["hostname"] for item in summary["cloudflare_access"]["applications"]]
 
-    assert "farm.example.com" in dns_hostnames
-    assert "office.example.com" in dns_hostnames
-    assert access_hostnames == ["farm.example.com", "litellm.example.com"]
-    assert "office.example.com" not in access_hostnames
+    assert "moodle.example.com" in dns_hostnames
+    assert "matrix.example.com" in dns_hostnames
+    assert access_hostnames == ["litellm.example.com"]
+    assert "matrix.example.com" not in access_hostnames
+    assert "moodle.example.com" not in access_hostnames
 
 
 def test_install_includes_coder_root_and_no_fee_wildcard_dns(

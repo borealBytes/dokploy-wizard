@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from dokploy_wizard.litellm import LiteLLMAdminUiCheckError
 from dokploy_wizard.service_verification_runner import (
     _merge_persisted_retry_keys,
+    _verify_backend_method,
     _verify_litellm_admin_ui,
-    _verify_surfsense_runtime,
     main,
     run_service_verification,
 )
-from dokploy_wizard.state import RawEnvInput, resolve_desired_state
+from dokploy_wizard.state import RawEnvInput
+from dokploy_wizard.verification import ServiceVerificationResult, make_verification_result
 
 
 def test_main_returns_success_and_prints_payload(
@@ -95,7 +97,7 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
                 "DOKPLOY_API_KEY=dokploy-key",
                 "DOKPLOY_ADMIN_EMAIL=admin@example.com",
                 "DOKPLOY_ADMIN_PASSWORD=secret-123",
-                "PACKS=nextcloud,moodle,docuseal",
+                "PACKS=matrix,docuseal,gitea,moodle",
                 "",
             ]
         ),
@@ -103,9 +105,17 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
     )
     state_dir = tmp_path / "state"
     seen: dict[str, Path] = {}
+    verified_services: list[str] = []
 
     class FakeLoadedState:
         raw_input = None
+
+    def fake_result(**_kwargs: Any) -> Any:
+        return type("Result", (), {"passed": True, "to_dict": lambda self: {}})()
+
+    def record_verified_backend(**kwargs: Any) -> Any:
+        verified_services.append(str(kwargs["service_name"]))
+        return fake_result()
 
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner.load_state_dir",
@@ -132,33 +142,20 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
         lambda **kwargs: object(),
     )
     monkeypatch.setattr(
-        "dokploy_wizard.service_verification_runner.cli._build_openclaw_backend",
-        lambda **kwargs: object(),
-    )
-    monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner._verify_shared_core",
-        lambda **kwargs: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
+        fake_result,
     )
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner._verify_litellm_admin_ui",
-        lambda: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
+        fake_result,
     )
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner._verify_backend_method",
-        lambda **kwargs: type("Result", (), {"passed": True, "to_dict": lambda self: {}})(),
+        record_verified_backend,
     )
-
-    def fail_if_surfsense_verified(**kwargs: object) -> None:
-        raise AssertionError("SurfSense verification should be omitted when pack is disabled.")
-
     monkeypatch.setattr(
-        "dokploy_wizard.service_verification_runner._verify_surfsense_runtime",
-        fail_if_surfsense_verified,
-    )
-
-    monkeypatch.setattr(
-        "dokploy_wizard.service_verification_runner.cli._build_nextcloud_backend",
-        lambda **kwargs: seen.setdefault("nextcloud", kwargs["state_dir"]),
+        "dokploy_wizard.service_verification_runner.cli._build_gitea_backend",
+        lambda **kwargs: seen.setdefault("gitea", kwargs["state_dir"]),
     )
     monkeypatch.setattr(
         "dokploy_wizard.service_verification_runner.cli._build_moodle_backend",
@@ -173,83 +170,65 @@ def test_run_service_verification_passes_state_dir_to_compose_builders(
 
     assert payload["passed"] is True
     assert seen == {
-        "nextcloud": state_dir,
+        "gitea": state_dir,
         "moodle": state_dir,
         "docuseal": state_dir,
     }
+    # Disabled packs (coder, matrix) are never verified, and the SeaweedFS
+    # expansion that Gitea pulls in verifies without an extra compose builder;
+    # verification is gated on the enabled pack set.
+    assert verified_services == ["moodle", "docuseal", "gitea", "seaweedfs"]
 
 
-class _SurfSenseVerificationBackend:
-    def __init__(self, *, backend_ready: bool = True) -> None:
-        self.backend_ready = backend_ready
-        self.public_urls: list[str] = []
-        self.internal_urls: list[str] = []
+class _FakePackBackend:
+    def __init__(self, result: object) -> None:
+        self._result = result
 
-    def check_health(self, *, service: object, url: str) -> bool:
-        del service
-        self.public_urls.append(url)
-        return not url.endswith("/ready") or self.backend_ready
-
-    def check_internal_health(self, *, service: object, url: str) -> bool:
-        del service
-        self.internal_urls.append(url)
-        return True
+    def _verify_current_application(self) -> object:
+        return self._result
 
 
-def test_verify_surfsense_runtime_passes_public_and_internal_checks() -> None:
-    desired_state = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "wizard-stack",
-                "ROOT_DOMAIN": "example.com",
-                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
-                "DOKPLOY_API_KEY": "dokploy-key",
-                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
-                "DOKPLOY_ADMIN_PASSWORD": "secret-123",
-                "PACKS": "surfsense",
-            },
-        )
+def test_verify_backend_method_returns_the_backend_result_verbatim() -> None:
+    expected: ServiceVerificationResult = make_verification_result(
+        service_name="matrix",
+        tier="app",
+        passed=True,
+        detail="Matrix synapse health and route readiness checks passed.",
     )
-    backend = _SurfSenseVerificationBackend()
 
-    result = _verify_surfsense_runtime(backend=backend, desired_state=desired_state)
+    result = _verify_backend_method(
+        backend=_FakePackBackend(expected),
+        method_name="_verify_current_application",
+        service_name="matrix",
+        unavailable_detail="Matrix verification backend is unavailable.",
+    )
 
+    assert result is expected
     assert result.passed is True
-    assert backend.public_urls == [
-        "https://surfsense.example.com/",
-        "https://surfsense-api.example.com/ready",
-        "https://surfsense-zero.example.com/keepalive",
-    ]
-    assert backend.internal_urls == ["http://searxng:8080/healthz"]
-    assert "Postgres" not in result.detail
-    assert "Redis" not in result.detail
-    assert "Celery" not in result.detail
-    assert "migrations" not in result.detail
-
-
-def test_verify_surfsense_runtime_fails_on_backend_ready_failure() -> None:
-    desired_state = resolve_desired_state(
-        RawEnvInput(
-            format_version=1,
-            values={
-                "STACK_NAME": "wizard-stack",
-                "ROOT_DOMAIN": "example.com",
-                "DOKPLOY_API_URL": "https://dokploy.example.com/api",
-                "DOKPLOY_API_KEY": "dokploy-key",
-                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
-                "DOKPLOY_ADMIN_PASSWORD": "secret-123",
-                "PACKS": "surfsense",
-            },
-        )
-    )
-    backend = _SurfSenseVerificationBackend(backend_ready=False)
-
-    result = _verify_surfsense_runtime(backend=backend, desired_state=desired_state)
-
-    assert result.passed is False
-    assert "public backend /ready" in result.detail
     assert "secret-123" not in result.detail
+
+
+def test_verify_backend_method_fails_when_pack_backend_is_unavailable() -> None:
+    result = _verify_backend_method(
+        backend=object(),
+        method_name="_verify_current_application",
+        service_name="moodle",
+        unavailable_detail="Moodle verification backend is unavailable.",
+    )
+
+    assert result.status == "fail"
+    assert result.passed is False
+    assert result.detail == "Moodle verification backend is unavailable."
+
+
+def test_verify_backend_method_rejects_non_verification_result() -> None:
+    with pytest.raises(TypeError, match="Expected ServiceVerificationResult from coder"):
+        _verify_backend_method(
+            backend=_FakePackBackend(object()),
+            method_name="_verify_current_application",
+            service_name="coder",
+            unavailable_detail="Coder verification backend is unavailable.",
+        )
 
 
 def test_verify_litellm_admin_ui_reports_the_internal_answer(

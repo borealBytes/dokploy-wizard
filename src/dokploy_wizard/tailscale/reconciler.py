@@ -102,6 +102,8 @@ class ShellTailscaleBackend:
     ) -> TailscaleManagedResource:
         if not self._is_installed():
             self._install()
+        else:
+            self._ensure_daemon_running()
         existing = self.get_status(resource_name)
         if existing is not None and existing.online:
             return TailscaleManagedResource(
@@ -226,6 +228,26 @@ class ShellTailscaleBackend:
             if stderr:
                 msg = f"{msg}: {stderr}"
             raise TailscaleError(msg)
+
+    def _ensure_daemon_running(self) -> None:
+        # The package can exist on a host whose daemon is stopped (an operator
+        # stopped it, or a provisioning pass wiped /var/lib/tailscale): `tailscale up`
+        # then dies with "failed to connect to local tailscaled" and blames the
+        # binary. Start the unit when systemd says it is down; hosts without
+        # systemctl or without the unit fall through — the later `up` reports the
+        # real failure and this function never invents one.
+        probe = self._run_service_command(["systemctl", "is-active", "--quiet", "tailscaled"])
+        if probe.returncode == 0:
+            return
+        self._run_service_command(["systemctl", "start", "tailscaled"])
+
+    def _run_service_command(self, command: list[str]) -> CommandResult:
+        # Service probes never raise: their exit status is the answer and any
+        # missing-systemd case must fall through to the normal tailscale path.
+        try:
+            return self._runner(command)
+        except Exception:
+            return CommandResult(returncode=127, stdout="", stderr="service command unavailable")
 
     def _run_tailscale_command(self, command: list[str]) -> CommandResult:
         try:

@@ -136,13 +136,13 @@ def test_update_team_posts_models_and_metadata() -> None:
         assert isinstance(raw_body, bytes)
         recorded["body"] = json.loads(raw_body.decode("utf-8"))
         return {
-            "team_id": "team-my-farm-advisor",
-            "team_alias": "my-farm-advisor",
+            "team_id": "team-coder-hermes",
+            "team_alias": "coder-hermes",
             "models": [
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ],
-            "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+            "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
         }
 
     team = LiteLLMAdminClient(
@@ -150,27 +150,27 @@ def test_update_team_posts_models_and_metadata() -> None:
         master_key="secret",
         request_fn=fake_request,
     ).update_team(
-        team_id="team-my-farm-advisor",
-        team_alias="my-farm-advisor",
+        team_id="team-coder-hermes",
+        team_alias="coder-hermes",
         models=(
             "local-model.internal/unsloth-active",
             "openrouter/anthropic/claude-3.5-sonnet",
         ),
-        metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
     )
 
     assert recorded["url"] == "http://litellm.internal/team/update"
     assert recorded["method"] == "POST"
     assert recorded["body"] == {
-        "team_id": "team-my-farm-advisor",
-        "team_alias": "my-farm-advisor",
+        "team_id": "team-coder-hermes",
+        "team_alias": "coder-hermes",
         "models": [
             "local-model.internal/unsloth-active",
             "openrouter/anthropic/claude-3.5-sonnet",
         ],
-        "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+        "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
     }
-    assert team.metadata == {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"}
+    assert team.metadata == {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 
 
 def test_create_team_accepts_enveloped_team_response() -> None:
@@ -180,17 +180,17 @@ def test_create_team_accepts_enveloped_team_response() -> None:
         raw_body = req.data
         assert isinstance(raw_body, bytes)
         assert json.loads(raw_body.decode("utf-8")) == {
-            "team_alias": "my-farm-advisor",
+            "team_alias": "coder-hermes",
             "models": ["openrouter/anthropic/claude-3.5-sonnet"],
-            "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+            "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
         }
         return {
             "ok": True,
             "team": {
-                "team_id": "team-my-farm-advisor",
-                "team_alias": "my-farm-advisor",
+                "team_id": "team-coder-hermes",
+                "team_alias": "coder-hermes",
                 "models": ["openrouter/anthropic/claude-3.5-sonnet"],
-                "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+                "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
             },
         }
 
@@ -199,13 +199,13 @@ def test_create_team_accepts_enveloped_team_response() -> None:
         master_key="secret",
         request_fn=fake_request,
     ).create_team(
-        team_alias="my-farm-advisor",
+        team_alias="coder-hermes",
         models=("openrouter/anthropic/claude-3.5-sonnet",),
-        metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
     )
 
-    assert team.team_id == "team-my-farm-advisor"
-    assert team.team_alias == "my-farm-advisor"
+    assert team.team_id == "team-coder-hermes"
+    assert team.team_alias == "coder-hermes"
     assert team.models == ("openrouter/anthropic/claude-3.5-sonnet",)
 
 
@@ -214,7 +214,7 @@ def test_create_team_accepts_aliasless_enveloped_team_response_with_fallback() -
         return {
             "data": {
                 "models": ["openrouter/anthropic/claude-3.5-sonnet"],
-                "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+                "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
             }
         }
 
@@ -223,15 +223,15 @@ def test_create_team_accepts_aliasless_enveloped_team_response_with_fallback() -
         master_key="secret",
         request_fn=fake_request,
     ).create_team(
-        team_alias="my-farm-advisor",
+        team_alias="coder-hermes",
         models=("openrouter/anthropic/claude-3.5-sonnet",),
-        metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
     )
 
-    assert team.team_id == "my-farm-advisor"
-    assert team.team_alias == "my-farm-advisor"
+    assert team.team_id == "coder-hermes"
+    assert team.team_alias == "coder-hermes"
     assert team.models == ("openrouter/anthropic/claude-3.5-sonnet",)
-    assert team.metadata == {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"}
+    assert team.metadata == {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 
 
 def test_update_team_accepts_enveloped_team_info_response() -> None:
@@ -239,10 +239,10 @@ def test_update_team_accepts_enveloped_team_info_response() -> None:
         return {
             "message": "updated",
             "team_info": {
-                "team_id": "team-my-farm-advisor",
-                "team_alias": "my-farm-advisor",
+                "team_id": "team-coder-hermes",
+                "team_alias": "coder-hermes",
                 "models": ["local-model.internal/unsloth-active"],
-                "metadata": {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+                "metadata": {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
             },
         }
 
@@ -251,23 +251,23 @@ def test_update_team_accepts_enveloped_team_info_response() -> None:
         master_key="secret",
         request_fn=fake_request,
     ).update_team(
-        team_id="team-my-farm-advisor",
-        team_alias="my-farm-advisor",
+        team_id="team-coder-hermes",
+        team_alias="coder-hermes",
         models=("local-model.internal/unsloth-active",),
-        metadata={"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
     )
 
-    assert team.team_id == "team-my-farm-advisor"
-    assert team.team_alias == "my-farm-advisor"
+    assert team.team_id == "team-coder-hermes"
+    assert team.team_alias == "coder-hermes"
     assert team.models == ("local-model.internal/unsloth-active",)
 
 
 def test_update_team_accepts_aliasless_direct_team_response_with_fallbacks() -> None:
     def fake_request(_: request.Request) -> object:
         return {
-            "team_id": "team-openclaw",
+            "team_id": "team-coder-kdense",
             "models": ["local-model.internal/unsloth-active"],
-            "metadata": {"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+            "metadata": {"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
         }
 
     team = LiteLLMAdminClient(
@@ -275,16 +275,16 @@ def test_update_team_accepts_aliasless_direct_team_response_with_fallbacks() -> 
         master_key="secret",
         request_fn=fake_request,
     ).update_team(
-        team_id="team-openclaw",
-        team_alias="openclaw",
+        team_id="team-coder-kdense",
+        team_alias="coder-kdense",
         models=("local-model.internal/unsloth-active",),
-        metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
     )
 
-    assert team.team_id == "team-openclaw"
-    assert team.team_alias == "openclaw"
+    assert team.team_id == "team-coder-kdense"
+    assert team.team_alias == "coder-kdense"
     assert team.models == ("local-model.internal/unsloth-active",)
-    assert team.metadata == {"consumer": "openclaw", "managed_by": "dokploy-wizard"}
+    assert team.metadata == {"consumer": "coder-kdense", "managed_by": "dokploy-wizard"}
 
 
 def test_update_team_fails_actionably_for_malformed_envelope() -> None:
@@ -302,8 +302,8 @@ def test_update_team_fails_actionably_for_malformed_envelope() -> None:
         match=r"team\.update response missing required string field.*nested objects under",
     ):
         client.update_team(
-            team_id="team-my-farm-advisor",
-            team_alias="my-farm-advisor",
+            team_id="team-coder-hermes",
+            team_alias="coder-hermes",
             models=("openrouter/anthropic/claude-3.5-sonnet",),
         )
 
@@ -314,10 +314,10 @@ def test_create_key_accepts_enveloped_generated_key_response() -> None:
             "info": "created",
             "data": {
                 "key": "sk-generated",
-                "key_alias": "openclaw",
-                "team_id": "team-openclaw",
+                "key_alias": "coder-kdense",
+                "team_id": "team-coder-kdense",
                 "models": ["openrouter/anthropic/claude-3.5-sonnet"],
-                "metadata": {"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+                "metadata": {"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
             },
         }
 
@@ -327,15 +327,15 @@ def test_create_key_accepts_enveloped_generated_key_response() -> None:
         request_fn=fake_request,
     ).create_key(
         key="sk-generated",
-        key_alias="openclaw",
-        team_id="team-openclaw",
+        key_alias="coder-kdense",
+        team_id="team-coder-kdense",
         models=("openrouter/anthropic/claude-3.5-sonnet",),
-        metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
     )
 
     assert key.key == "sk-generated"
-    assert key.key_alias == "openclaw"
-    assert key.team_id == "team-openclaw"
+    assert key.key_alias == "coder-kdense"
+    assert key.team_id == "team-coder-kdense"
     assert key.models == ("openrouter/anthropic/claude-3.5-sonnet",)
 
 
@@ -344,7 +344,7 @@ def test_update_key_accepts_nested_key_record_with_fallback_fields() -> None:
         return {
             "result": {
                 "models": ["local-model.internal/unsloth-active"],
-                "metadata": {"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+                "metadata": {"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
             }
         }
 
@@ -353,16 +353,16 @@ def test_update_key_accepts_nested_key_record_with_fallback_fields() -> None:
         master_key="secret",
         request_fn=fake_request,
     ).update_key(
-        key_alias="openclaw",
+        key_alias="coder-kdense",
         key="sk-existing",
-        team_id="team-openclaw",
+        team_id="team-coder-kdense",
         models=("local-model.internal/unsloth-active",),
-        metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+        metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
     )
 
     assert key.key == "sk-existing"
-    assert key.key_alias == "openclaw"
-    assert key.team_id == "team-openclaw"
+    assert key.key_alias == "coder-kdense"
+    assert key.team_id == "team-coder-kdense"
     assert key.models == ("local-model.internal/unsloth-active",)
 
 
@@ -385,12 +385,12 @@ def test_delete_key_deletes_by_alias_list_payload() -> None:
         api_url="http://litellm.internal",
         master_key="secret",
         request_fn=fake_request,
-    ).delete_key(key_alias="openclaw")
+    ).delete_key(key_alias="coder-kdense")
 
     assert recorded == [
         {
             "method": "POST",
             "url": "http://litellm.internal/key/delete",
-            "body": {"key_aliases": ["openclaw"]},
+            "body": {"key_aliases": ["coder-kdense"]},
         }
     ]

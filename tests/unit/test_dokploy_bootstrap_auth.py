@@ -6,6 +6,7 @@ import http.cookiejar
 import json
 from email.message import Message
 from io import BytesIO
+from typing import cast
 from urllib import error, request
 
 import pytest
@@ -13,9 +14,36 @@ import pytest
 from dokploy_wizard.dokploy import DokployBootstrapAuthClient, DokployBootstrapAuthError
 
 
+def test_bootstrap_auth_creates_api_key_without_per_key_rate_limit() -> None:
+    # Self-hosted Dokploy forwards the create input to better-auth, whose
+    # api-key plugin defaults to a 10-requests-per-24h cap. The wizard must
+    # explicitly disable it (as Dokploy's own UI does) or a cold install is
+    # 429-exhausted by the mutation-auth qualify step.
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/user.createApiKey"):
+            body = cast(bytes, req.data)
+            captured_payloads.append(json.loads(body.decode("utf-8")))
+            return {"apiKey": "dokp-key-123"}
+        raise AssertionError(req.full_url)
+
+    result = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    ).ensure_api_key(admin_email="admin@example.com", admin_password="secret-123")
+
+    assert result.api_key == "dokp-key-123"
+    assert captured_payloads[0]["rateLimitEnabled"] is False
+
+
 def test_bootstrap_auth_signs_in_and_creates_api_key() -> None:
     seen: list[str] = []
-
     def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
         del jar
         seen.append(req.full_url)
@@ -328,6 +356,85 @@ def test_bootstrap_auth_ai_provider_methods_use_session_endpoints() -> None:
             "isEnabled": True,
         },
     )
+
+
+def test_bootstrap_auth_ai_delete_confirms_removal_via_recovery_list() -> None:
+    requests_seen: list[tuple[str, str, object | None]] = []
+
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        body = json.loads(req.data.decode("utf-8")) if isinstance(req.data, bytes) else None
+        requests_seen.append((req.get_method(), req.full_url, body))
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/ai.delete"):
+            return True
+        if req.full_url.endswith("/api/ai.getAll"):
+            return [
+                {
+                    "aiId": "ai-1",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "model": "local/model",
+                    "isEnabled": True,
+                }
+            ]
+        raise AssertionError(req.full_url)
+
+    client = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    )
+
+    deleted = client.delete_ai_provider(
+        admin_email="admin@example.com",
+        admin_password="secret-123",
+        ai_id="ai-9",
+    )
+
+    assert deleted is True
+    assert (
+        "POST",
+        "http://127.0.0.1:3000/api/ai.delete",
+        {"aiId": "ai-9"},
+    ) in requests_seen
+    assert requests_seen[-1] == ("GET", "http://127.0.0.1:3000/api/ai.getAll", None)
+
+
+def test_bootstrap_auth_ai_delete_fails_closed_when_provider_survives() -> None:
+    def fake_request(req: request.Request, jar: http.cookiejar.CookieJar) -> object:
+        del jar
+        if req.full_url.endswith("/api/auth/sign-in/email"):
+            return {"ok": True}
+        if req.full_url.endswith("/api/user.session"):
+            return {"session": {"activeOrganizationId": "org-1"}}
+        if req.full_url.endswith("/api/ai.delete"):
+            return True
+        if req.full_url.endswith("/api/ai.getAll"):
+            return [
+                {
+                    "aiId": "ai-9",
+                    "name": "Dokploy Wizard LiteLLM",
+                    "apiUrl": "http://litellm:4000/v1",
+                    "model": "local/model",
+                    "isEnabled": True,
+                }
+            ]
+        raise AssertionError(req.full_url)
+
+    client = DokployBootstrapAuthClient(
+        base_url="http://127.0.0.1:3000",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployBootstrapAuthError, match="still present"):
+        client.delete_ai_provider(
+            admin_email="admin@example.com",
+            admin_password="secret-123",
+            ai_id="ai-9",
+        )
 
 
 def test_bootstrap_auth_ai_create_recovers_provider_after_list_success_response() -> None:

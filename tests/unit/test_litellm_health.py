@@ -11,9 +11,10 @@ from dokploy_wizard.litellm.admin import (
     LiteLLMTeamRecord,
     LiteLLMVirtualKeyRecord,
 )
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 
-class FakeReadinessApi:
+class FakeReadinessApi(LiteLLMGroupApiStub):
     def __init__(self, snapshots: list[dict[str, object]]) -> None:
         self._snapshots = list(snapshots)
         self.calls = 0
@@ -57,6 +58,8 @@ class FakeReadinessApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected create_key call")
 
@@ -68,11 +71,16 @@ class FakeReadinessApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         raise AssertionError("unexpected update_key call")
 
     def delete_key(self, *, key_alias: str) -> None:
         raise AssertionError(f"unexpected delete_key call for {key_alias}")
+
+    def delete_team(self, *, team_id: str) -> None:
+        raise AssertionError(f"unexpected delete_team call for {team_id}")
 
 
 class FakeTransientReadinessApi(FakeReadinessApi):

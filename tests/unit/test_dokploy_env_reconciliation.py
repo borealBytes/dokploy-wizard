@@ -8,16 +8,16 @@ from typing import Any
 
 import pytest
 
-_OPENCLAW_SECRET_KEY = "OPENCLAW_PROVIDER_API_KEY"
-_OPENCLAW_SECRET_VALUE = "SECRET_TEST_OPENROUTER_VALUE"
-_FARM_SECRET_KEY = "MY_FARM_ADVISOR_PROVIDER_API_KEY"
-_FARM_SECRET_VALUE = "SECRET_TEST_FARM_PROVIDER_VALUE"
-_NEXTCLOUD_SECRET_KEY = "NEXTCLOUD_ADMIN_PASSWORD"
-_NEXTCLOUD_SECRET_VALUE = "SECRET_TEST_NEXTCLOUD_ADMIN_VALUE"
+_PACK_SECRET_KEY = "CODER_PROVIDER_API_KEY"
+_PACK_SECRET_VALUE = "SECRET_TEST_CODER_PROVIDER_VALUE"
+_OWNER_SECRET_KEY = "DOCUSEAL_PROVIDER_API_KEY"
+_OWNER_SECRET_VALUE = "SECRET_TEST_DOCUSEAL_PROVIDER_VALUE"
+_MATRIX_SECRET_KEY = "MATRIX_ADMIN_PASSWORD"
+_MATRIX_SECRET_VALUE = "SECRET_TEST_MATRIX_ADMIN_VALUE"
 _SENTINEL_SECRET_VALUES = (
-    _OPENCLAW_SECRET_VALUE,
-    _FARM_SECRET_VALUE,
-    _NEXTCLOUD_SECRET_VALUE,
+    _PACK_SECRET_VALUE,
+    _OWNER_SECRET_VALUE,
+    _MATRIX_SECRET_VALUE,
 )
 
 
@@ -134,49 +134,49 @@ def test_reconciler_applies_env_before_first_safe_compose_deploy() -> None:
     ) = _future_env_contract()
     client = _RecordingDokployEnvClient()
     compose_file = f"""services:
-  wizard-stack-openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+  wizard-stack-coder:
+    image: codercom/enterprise-base:latest
     environment:
-      {_OPENCLAW_SECRET_KEY}: \"${{{_OPENCLAW_SECRET_KEY}:?{_OPENCLAW_SECRET_KEY} is required}}\"
+      {_PACK_SECRET_KEY}: \"${{{_PACK_SECRET_KEY}:?{_PACK_SECRET_KEY} is required}}\"
 """
     rendered = RenderedCompose(
         compose_file=compose_file,
         env_specs=(
             DokployEnvSpec(
                 variable=DokployEnvVar(
-                    name=_OPENCLAW_SECRET_KEY,
-                    value=_OPENCLAW_SECRET_VALUE,
+                    name=_PACK_SECRET_KEY,
+                    value=_PACK_SECRET_VALUE,
                     sensitive=True,
                     source="operator-input",
                 ),
-                owner="openclaw",
-                target_services=("wizard-stack-openclaw",),
-                placeholder=f"${{{_OPENCLAW_SECRET_KEY}:?{_OPENCLAW_SECRET_KEY} is required}}",
+                owner="coder",
+                target_services=("wizard-stack-coder",),
+                placeholder=f"${{{_PACK_SECRET_KEY}:?{_PACK_SECRET_KEY} is required}}",
                 required=True,
             ),
         ),
     )
 
     record = DokployEnvReconciler(client=client).reconcile_compose(
-        name="wizard-stack-openclaw",
+        name="wizard-stack-coder",
         environment_id="env-1",
-        app_name="wizard-stack-openclaw",
+        app_name="wizard-stack-coder",
         rendered=rendered,
         existing_compose_id=None,
     )
 
     assert record.compose_id == "cmp-1"
     assert client.events == [
-        "create:wizard-stack-openclaw",
-        "env:wizard-stack-openclaw",
-        "compose:wizard-stack-openclaw",
-        "deploy:wizard-stack-openclaw",
+        "create:wizard-stack-coder",
+        "env:wizard-stack-coder",
+        "compose:wizard-stack-coder",
+        "deploy:wizard-stack-coder",
     ]
-    assert _OPENCLAW_SECRET_VALUE not in client.compose_file_by_id[record.compose_id]
+    assert _PACK_SECRET_VALUE not in client.compose_file_by_id[record.compose_id]
     _assert_payload_value(
         client.compose_env_by_id[record.compose_id],
-        key=_OPENCLAW_SECRET_KEY,
-        expected_value=_OPENCLAW_SECRET_VALUE,
+        key=_PACK_SECRET_KEY,
+        expected_value=_PACK_SECRET_VALUE,
     )
 
 
@@ -190,8 +190,8 @@ def test_reconciler_rejects_unmatched_placeholder_without_echoing_secret_values(
     ) = _future_env_contract()
     rendered = RenderedCompose(
         compose_file="""services:
-  wizard-stack-openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+  wizard-stack-coder:
+    image: codercom/enterprise-base:latest
     environment:
       MISSING_SECRET: "${MISSING_SECRET:?MISSING_SECRET is required}"
 """,
@@ -216,22 +216,22 @@ def test_reconciler_rejects_raw_secret_scalar_without_echoing_secret_value() -> 
     ) = _future_env_contract()
     rendered = RenderedCompose(
         compose_file=f"""services:
-  wizard-stack-openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+  wizard-stack-coder:
+    image: codercom/enterprise-base:latest
     environment:
-      {_OPENCLAW_SECRET_KEY}: "{_OPENCLAW_SECRET_VALUE}"
+      {_PACK_SECRET_KEY}: "{_PACK_SECRET_VALUE}"
 """,
         env_specs=(
             DokployEnvSpec(
                 variable=DokployEnvVar(
-                    name=_OPENCLAW_SECRET_KEY,
-                    value=_OPENCLAW_SECRET_VALUE,
+                    name=_PACK_SECRET_KEY,
+                    value=_PACK_SECRET_VALUE,
                     sensitive=True,
                     source="operator-input",
                 ),
-                owner="openclaw",
-                target_services=("wizard-stack-openclaw",),
-                placeholder=f"${{{_OPENCLAW_SECRET_KEY}:?{_OPENCLAW_SECRET_KEY} is required}}",
+                owner="coder",
+                target_services=("wizard-stack-coder",),
+                placeholder=f"${{{_PACK_SECRET_KEY}:?{_PACK_SECRET_KEY} is required}}",
                 required=True,
             ),
         ),
@@ -241,8 +241,8 @@ def test_reconciler_rejects_raw_secret_scalar_without_echoing_secret_value() -> 
         DokployEnvReconciler(client=_RecordingDokployEnvClient()).validate_rendered_compose(rendered)
 
     message = str(exc_info.value)
-    assert _OPENCLAW_SECRET_KEY in message
-    assert "wizard-stack-openclaw" in message
+    assert _PACK_SECRET_KEY in message
+    assert "wizard-stack-coder" in message
     _assert_message_redacts_sentinels(message)
 
 
@@ -256,26 +256,26 @@ def test_reconciler_rejects_unrelated_service_receiving_unrelated_secret() -> No
     ) = _future_env_contract()
     rendered = RenderedCompose(
         compose_file=f"""services:
-  wizard-stack-nextcloud:
-    image: nextcloud:29-apache
+  wizard-stack-matrix:
+    image: matrixdotorg/synapse:latest
     environment:
-      {_FARM_SECRET_KEY}: \"${{{_FARM_SECRET_KEY}:?{_FARM_SECRET_KEY} is required}}\"
-  wizard-stack-my-farm-advisor:
-    image: ghcr.io/borealbytes/my-farm-advisor:latest
+      {_OWNER_SECRET_KEY}: \"${{{_OWNER_SECRET_KEY}:?{_OWNER_SECRET_KEY} is required}}\"
+  wizard-stack-docuseal:
+    image: sealar/docuseal:latest
     environment:
-      {_FARM_SECRET_KEY}: \"${{{_FARM_SECRET_KEY}:?{_FARM_SECRET_KEY} is required}}\"
+      {_OWNER_SECRET_KEY}: \"${{{_OWNER_SECRET_KEY}:?{_OWNER_SECRET_KEY} is required}}\"
 """,
         env_specs=(
             DokployEnvSpec(
                 variable=DokployEnvVar(
-                    name=_FARM_SECRET_KEY,
-                    value=_FARM_SECRET_VALUE,
+                    name=_OWNER_SECRET_KEY,
+                    value=_OWNER_SECRET_VALUE,
                     sensitive=True,
                     source="operator-input",
                 ),
-                owner="my-farm-advisor",
-                target_services=("wizard-stack-my-farm-advisor",),
-                placeholder=f"${{{_FARM_SECRET_KEY}:?{_FARM_SECRET_KEY} is required}}",
+                owner="docuseal",
+                target_services=("wizard-stack-docuseal",),
+                placeholder=f"${{{_OWNER_SECRET_KEY}:?{_OWNER_SECRET_KEY} is required}}",
                 required=True,
             ),
         ),
@@ -285,7 +285,7 @@ def test_reconciler_rejects_unrelated_service_receiving_unrelated_secret() -> No
         DokployEnvReconciler(client=_RecordingDokployEnvClient()).validate_rendered_compose(rendered)
 
     message = str(exc_info.value)
-    assert _FARM_SECRET_KEY in message
-    assert "wizard-stack-nextcloud" in message
-    assert "my-farm-advisor" in message
+    assert _OWNER_SECRET_KEY in message
+    assert "wizard-stack-matrix" in message
+    assert "docuseal" in message
     _assert_message_redacts_sentinels(message)

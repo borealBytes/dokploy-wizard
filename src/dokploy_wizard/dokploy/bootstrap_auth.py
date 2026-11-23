@@ -64,6 +64,13 @@ class DokployBootstrapAuthClient:
             {
                 "name": key_name,
                 "metadata": {"organizationId": organization_id},
+                # Self-hosted Dokploy forwards this input verbatim to the
+                # better-auth api-key plugin, whose defaults cap a key at 10
+                # requests per 24h window. Dokploy's own UI disables the
+                # per-key limiter for the same reason; without this the
+                # wizard's key is 429-exhausted by mid-qualify on a cold
+                # install, and a modify pass can die on its own credentials.
+                "rateLimitEnabled": False,
             },
         )
         api_key = _extract_api_key(api_key_payload)
@@ -545,6 +552,38 @@ class DokployBootstrapAuthClient:
             is_enabled=is_enabled,
         )
 
+
+    def delete_ai_provider(
+        self,
+        *,
+        admin_email: str,
+        admin_password: str,
+        ai_id: str,
+    ) -> bool:
+        self._authenticate(admin_email=admin_email, admin_password=admin_password)
+        self._resolve_session()
+        self._request_json(
+            "POST",
+            "/api/ai.delete",
+            {"aiId": ai_id},
+            allow_scalar_data=True,
+        )
+        providers = self._request_json("GET", "/api/ai.getAll", None)
+        if not isinstance(providers, list):
+            raise DokployBootstrapAuthError(
+                "Dokploy session ai.delete recovery list response must decode to a JSON array."
+            )
+        lingering = [
+            provider
+            for provider in providers
+            if isinstance(provider, dict) and provider.get("aiId") == ai_id
+        ]
+        if lingering:
+            raise DokployBootstrapAuthError(
+                "Dokploy session ai.delete succeeded but provider recovery found the record "
+                "still present."
+            )
+        return True
 
     def test_ai_provider_connection(
         self,

@@ -27,21 +27,21 @@ class _Locator:
 
 
 def test_matching_healthy_compose_skips_mutation(tmp_path: Path) -> None:
-    service_name = "wizard-stack-nextcloud"
-    compose_file = "services:\r\n  app:   \r\n    image: nextcloud:latest   \r\n"
+    service_name = "wizard-stack-matrix"
+    compose_file = "services:\r\n  app:   \r\n    image: matrixdotorg/synapse:latest   \r\n"
     _write_hash_checkpoint(
         tmp_path,
         service_key=service_name,
-        rendered_compose="services:\n  app:\n    image: nextcloud:latest\n",
+        rendered_compose="services:\n  app:\n    image: matrixdotorg/synapse:latest\n",
     )
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-nextcloud",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-nextcloud")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=compose_file,
@@ -50,8 +50,8 @@ def test_matching_healthy_compose_skips_mutation(tmp_path: Path) -> None:
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard nextcloud reconcile",
-        description="Update Nextcloud + OnlyOffice compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: True,
         locator_factory=lambda compose_id: _Locator(
             project_id=locator.project_id,
@@ -65,17 +65,17 @@ def test_matching_healthy_compose_skips_mutation(tmp_path: Path) -> None:
 
 
 def test_matching_unhealthy_compose_redeploys(tmp_path: Path) -> None:
-    service_name = "wizard-stack-openclaw"
-    compose_file = "services:\n  app:\n    image: ghcr.io/borealbytes/openclaw:latest\n"
+    service_name = "wizard-stack-matrix"
+    compose_file = "services:\n  app:\n    image: matrixdotorg/synapse:stable\n"
     _write_hash_checkpoint(tmp_path, service_key=service_name, rendered_compose=compose_file)
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-openclaw",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-openclaw")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=compose_file,
@@ -84,8 +84,8 @@ def test_matching_unhealthy_compose_redeploys(tmp_path: Path) -> None:
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard openclaw reconcile",
-        description="Update openclaw compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: ServiceVerificationResult(
             service_name=service_name,
             tier="app",
@@ -182,7 +182,7 @@ def test_missing_hash_triggers_deploy_and_persists_new_hash(tmp_path: Path) -> N
 
 
 def test_matching_rendered_compose_and_env_metadata_skips_mutation(tmp_path: Path) -> None:
-    service_name = "wizard-stack-openclaw"
+    service_name = "wizard-stack-matrix"
     rendered = _rendered_env_compose(value="initial-secret")
     _write_empty_checkpoint(tmp_path)
     persist_compose_artifact_hash(
@@ -193,11 +193,11 @@ def test_matching_rendered_compose_and_env_metadata_skips_mutation(tmp_path: Pat
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-openclaw",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=rendered.compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-openclaw")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=rendered,
@@ -206,8 +206,8 @@ def test_matching_rendered_compose_and_env_metadata_skips_mutation(tmp_path: Pat
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard openclaw reconcile",
-        description="Update OpenClaw compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: True,
         locator_factory=lambda compose_id: _Locator(
             project_id=locator.project_id,
@@ -223,7 +223,7 @@ def test_matching_rendered_compose_and_env_metadata_skips_mutation(tmp_path: Pat
 def test_legacy_compose_hash_without_env_metadata_reconciles_rendered_env(
     tmp_path: Path,
 ) -> None:
-    service_name = "wizard-stack-openclaw"
+    service_name = "wizard-stack-matrix"
     rendered = _rendered_env_compose(value="current-secret")
     _write_hash_checkpoint(
         tmp_path,
@@ -233,11 +233,11 @@ def test_legacy_compose_hash_without_env_metadata_reconciles_rendered_env(
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-openclaw",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=rendered.compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-openclaw")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=rendered,
@@ -246,8 +246,8 @@ def test_legacy_compose_hash_without_env_metadata_reconciles_rendered_env(
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard openclaw reconcile",
-        description="Update OpenClaw compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: True,
         locator_factory=lambda compose_id: _Locator(
             project_id=locator.project_id,
@@ -258,13 +258,13 @@ def test_legacy_compose_hash_without_env_metadata_reconciles_rendered_env(
 
     assert result.status == "applied"
     client.assert_single_update_deploy_pair(service_name)
-    assert "OPENCLAW_GATEWAY_TOKEN=current-secret" in client.compose_env_by_name[service_name]
+    assert "MATRIX_ADMIN_PASSWORD=current-secret" in client.compose_env_by_name[service_name]
 
 
 def test_env_metadata_change_triggers_reconciliation_without_compose_change(
     tmp_path: Path,
 ) -> None:
-    service_name = "wizard-stack-openclaw"
+    service_name = "wizard-stack-matrix"
     original = _rendered_env_compose(value="stable-secret", source="operator-input")
     changed = _rendered_env_compose(value="stable-secret", source="generated-runtime")
     _write_empty_checkpoint(tmp_path)
@@ -276,11 +276,11 @@ def test_env_metadata_change_triggers_reconciliation_without_compose_change(
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-openclaw",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=changed.compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-openclaw")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=changed,
@@ -289,8 +289,8 @@ def test_env_metadata_change_triggers_reconciliation_without_compose_change(
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard openclaw reconcile",
-        description="Update OpenClaw compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: True,
         locator_factory=lambda compose_id: _Locator(
             project_id=locator.project_id,
@@ -304,7 +304,7 @@ def test_env_metadata_change_triggers_reconciliation_without_compose_change(
 
 
 def test_env_value_change_reconciles_without_persisting_raw_values(tmp_path: Path) -> None:
-    service_name = "wizard-stack-openclaw"
+    service_name = "wizard-stack-matrix"
     old_secret = "old-runtime-secret"
     new_secret = "new-runtime-secret"
     original = _rendered_env_compose(value=old_secret)
@@ -318,11 +318,11 @@ def test_env_value_change_reconciles_without_persisting_raw_values(tmp_path: Pat
     client = FakeDokployApiClient()
     client.seed_existing_service(
         service_name=service_name,
-        compose_id="cmp-openclaw",
+        compose_id="cmp-matrix",
         project_name="wizard-stack",
         compose_file=changed.compose_file,
     )
-    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-openclaw")
+    locator = _Locator(project_id="proj-1", environment_id="env-1", compose_id="cmp-matrix")
 
     result = apply_compose_noop_guard(
         rendered_compose=changed,
@@ -331,8 +331,8 @@ def test_env_value_change_reconciles_without_persisting_raw_values(tmp_path: Pat
         client=client,
         locator=locator,
         compose_id=locator.compose_id,
-        title="dokploy-wizard openclaw reconcile",
-        description="Update OpenClaw compose app",
+        title="dokploy-wizard matrix reconcile",
+        description="Update Matrix compose app",
         verify_current=lambda: True,
         locator_factory=lambda compose_id: _Locator(
             project_id=locator.project_id,
@@ -343,7 +343,7 @@ def test_env_value_change_reconciles_without_persisting_raw_values(tmp_path: Pat
 
     serialized_state = (tmp_path / "applied-state.json").read_text(encoding="utf-8")
     assert result.status == "applied"
-    assert f"OPENCLAW_GATEWAY_TOKEN={new_secret}" in client.compose_env_by_name[service_name]
+    assert f"MATRIX_ADMIN_PASSWORD={new_secret}" in client.compose_env_by_name[service_name]
     assert old_secret not in serialized_state
     assert new_secret not in serialized_state
     assert "redacted_fingerprint" in serialized_state
@@ -380,24 +380,24 @@ def _write_hash_checkpoint(state_dir: Path, *, service_key: str, rendered_compos
 def _rendered_env_compose(
     *, value: str, source: str = "operator-input"
 ) -> RenderedCompose:
-    placeholder = "${OPENCLAW_GATEWAY_TOKEN:?OPENCLAW_GATEWAY_TOKEN is required}"
+    placeholder = "${MATRIX_ADMIN_PASSWORD:?MATRIX_ADMIN_PASSWORD is required}"
     return RenderedCompose(
         compose_file=(
             "services:\n"
             "  app:\n"
-            "    image: ghcr.io/borealbytes/openclaw:latest\n"
+            "    image: matrixdotorg/synapse:stable\n"
             "    environment:\n"
-            f"      OPENCLAW_GATEWAY_TOKEN: \"{placeholder}\"\n"
+            f"      MATRIX_ADMIN_PASSWORD: \"{placeholder}\"\n"
         ),
         env_specs=(
             DokployEnvSpec(
                 variable=DokployEnvVar(
-                    name="OPENCLAW_GATEWAY_TOKEN",
+                    name="MATRIX_ADMIN_PASSWORD",
                     value=value,
                     sensitive=True,
                     source=source,
                 ),
-                owner="openclaw",
+                owner="matrix",
                 target_services=("app",),
                 placeholder=placeholder,
             ),

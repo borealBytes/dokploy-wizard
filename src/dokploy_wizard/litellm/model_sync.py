@@ -1,20 +1,27 @@
 """LiteLLM gateway model autosync.
 
 The autosync sidecar runs beside the shared-core LiteLLM service, polls the
-configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA), and
-registers newly published models through the LiteLLM admin API. Each cycle
+configured model catalog sources (OpenRouter, OpenCode Zen, NVIDIA, and the
+operator's own OpenAI-compatible endpoint), and registers newly published
+models through the LiteLLM admin API. Each cycle
 also refreshes consumer virtual-key allowlists with the explicit sync/* set,
 because /v1/models does not expand the sync/* wildcard and workspace tooling
-seeds its model picker from that endpoint. This module renders the sidecar's
-source document, exposes the shared gating rules, and loads the sidecar script
-text that is mounted into the container.
+seeds its model picker from that endpoint. Synced aliases are provider-qualified
+and flat — sync/<provider>-<model-id> with the id's slashes written as "->" —
+so surfaces that render only the last path segment of a model id still show
+which provider's bill an alias touches, and each alias records the provider's
+per-token cost wherever a catalog prices the model. This module renders the
+sidecar's source document, exposes the shared gating rules, and loads the
+sidecar script text that is mounted into the container.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlparse
 
 MODEL_SYNC_ALIAS_PREFIX = "sync"
 MODEL_SYNC_CONSUMER_WILDCARD = "sync/*"
@@ -22,7 +29,7 @@ MODEL_SYNC_MANAGED_BY = "dokploy-wizard-model-sync"
 MODEL_SYNC_DEFAULT_INTERVAL_MINUTES = 360
 MODEL_SYNC_MIN_INTERVAL_MINUTES = 5
 MODEL_SYNC_DEFAULT_MAX_MODELS_PER_PROVIDER = 50
-MODEL_SYNC_DEFAULT_PROVIDERS = ("openrouter", "opencode-go", "nvidia")
+MODEL_SYNC_DEFAULT_PROVIDERS = ("openrouter", "opencode-go", "nvidia", "local")
 # One stable alias for "the model an agent gets when the operator did not name one".
 # The provider half stays an explicit operator choice; only the model is picked, from
 # the live catalog, by pattern. That way a rename upstream costs a sync cycle instead
@@ -77,12 +84,22 @@ _NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 # stays human-scale. Probe verdicts are cached for a week; dead models are
 # re-probed every cycle.
 MODEL_SYNC_NVIDIA_MAX_MODELS_DEFAULT = 20
+# A personal endpoint serves what the operator loaded, usually one model at a
+# time; the listing shape is the OpenAI one, so no probe or ranking slice is
+# needed. The cap only guards against a runaway /v1/models listing.
+MODEL_SYNC_LOCAL_MAX_MODELS = 50
+# Placeholder key handed to LiteLLM for a local endpoint configured without a
+# key. The same convention the static local alias uses; OpenAI-compatible
+# servers that do not check auth (sglang, vLLM default, Ollama) discard it.
+MODEL_SYNC_LOCAL_KEYLESS_API_KEY = "sk-no-key-required"
 MODEL_SYNC_DEFAULT_PROBE_TTL_DAYS = 7
 # models.dev is the registry OpenCode itself consumes: per-model pricing in
-# the same org/model id form NVIDIA's /models list uses, which lets the sync
-# keep only zero-cost (free-tier) NVIDIA endpoints before probing, so no paid
-# chat completion is ever sent.
-_NVIDIA_FREE_CATALOG_URL = "https://models.dev/api.json"
+# the same org/model id form the provider catalogs use. The sync consumes it
+# twice over — as the zero-cost gate that keeps paid NVIDIA endpoints out of
+# the picker (and off the chat probe that would bill them), and as the price
+# catalog behind every synced alias, so operator-facing cost metadata comes
+# from the same registry the free-tier claim is made with.
+_MODELS_DEV_CATALOG_URL = "https://models.dev/api.json"
 
 
 def model_sync_service_name(litellm_service_name: str) -> str:
@@ -237,7 +254,6 @@ def build_model_sync_sources(
             sources.append(
                 {
                     "name": "openrouter",
-                    "alias_prefix": f"{MODEL_SYNC_ALIAS_PREFIX}/openrouter",
                     "list_url": _OPENROUTER_CATALOG_URL,
                     "rankings_url": _OPENROUTER_RANKINGS_URL,
                     "api_key_env": openrouter_api_key_env,
@@ -262,13 +278,17 @@ def build_model_sync_sources(
             sources.append(
                 {
                     "name": "opencode-go",
-                    "alias_prefix": f"{MODEL_SYNC_ALIAS_PREFIX}/opencode-go",
                     "list_url": f"{base_url}/models",
                     "api_key_env": opencode_go_api_key_env,
                     "api_base": base_url,
                     "model_ref_template": "openai/{model}",
                     "max_models": MODEL_SYNC_OPENCODE_GO_MAX_MODELS,
                     "extra_headers": dict(OPENCODE_GO_GATEWAY_EXTRA_HEADERS),
+                    # The gateway's own catalog rows carry no pricing, so the
+                    # sidecar reads provider costs from models.dev, which keys
+                    # OpenCode Go models by the same ids.
+                    "cost_catalog_url": _MODELS_DEV_CATALOG_URL,
+                    "cost_catalog_provider": "opencode-go",
                 }
             )
 
@@ -279,7 +299,6 @@ def build_model_sync_sources(
             sources.append(
                 {
                     "name": "nvidia",
-                    "alias_prefix": f"{MODEL_SYNC_ALIAS_PREFIX}/nvidia",
                     "list_url": f"{base_url}/models",
                     "api_key_env": nvidia_api_key_env,
                     "api_base": base_url,
@@ -288,13 +307,40 @@ def build_model_sync_sources(
                     "probe": model_sync_nvidia_probe_enabled(flat_env),
                     "probe_ttl_days": model_sync_probe_ttl_days(flat_env),
                     "free_only": model_sync_nvidia_free_only(flat_env),
-                    "free_catalog_url": _NVIDIA_FREE_CATALOG_URL,
-                    "free_catalog_provider": "nvidia",
+                    # Doubles as the zero-cost gate (free_only) and the price
+                    # catalog for the cost metadata every alias carries.
+                    "cost_catalog_url": _MODELS_DEV_CATALOG_URL,
+                    "cost_catalog_provider": "nvidia",
                     # Free-verified aliases get a ":free" tail so pickers show
                     # what the model actually costs the operator: nothing.
                     "alias_suffix": ":free",
                 }
             )
+
+    if "local" in providers:
+        local_base_url = _optional(flat_env, "LITELLM_LOCAL_BASE_URL")
+        if local_base_url is not None:
+            # The endpoint's own /v1/models is the catalog: whatever the operator
+            # is serving right now, exposed by the name it is served under, rescanned
+            # every cycle like any other provider. No static model id to configure.
+            # The source is named for the host that serves (its tailnet label), not a
+            # generic "local", so a picker shows which machine answers each alias.
+            source: dict[str, object] = {
+                "name": _local_source_name(local_base_url),
+                "list_url": f"{local_base_url.rstrip('/')}/models",
+                "api_base": local_base_url.rstrip("/"),
+                "model_ref_template": "openai/{model}",
+                "max_models": MODEL_SYNC_LOCAL_MAX_MODELS,
+                # Same posture as the static local alias: local chat templates
+                # can reject system messages that do not lead the history, so the
+                # gateway folds system content into user content.
+                "litellm_params_extra": {"supports_system_message": False},
+            }
+            if _optional(flat_env, "LITELLM_LOCAL_API_KEY") is not None:
+                source["api_key_env"] = "LITELLM_LOCAL_API_KEY"
+            else:
+                source["default_api_key"] = MODEL_SYNC_LOCAL_KEYLESS_API_KEY
+            sources.append(source)
 
     default_chat = build_default_chat_config(flat_env)
     if default_chat is not None:
@@ -356,6 +402,24 @@ def _api_key_env(
         if _optional(flat_env, legacy) is not None and _optional(flat_env, canonical) is None:
             return legacy
     return None
+
+
+def _local_source_name(base_url: str) -> str:
+    """Source alias for a local endpoint: the first label of its host.
+
+    tuxdesktop.felis-aeolian.ts.net names the machine, not the tailnet or the
+    port, and the label survives MagicDNS suffix churn. A bare IP keeps its
+    full dotted form; anything that cannot be a host falls back to "local".
+    """
+
+    host = urlparse(base_url).hostname or ""
+    label = host.split(".")[0] if not _looks_numeric(host) else host
+    label = re.sub(r"[^a-z0-9_.-]+", "-", label.lower()).strip("-.")
+    return label or "local"
+
+
+def _looks_numeric(host: str) -> bool:
+    return all(part.isdigit() for part in host.split(".")) if host else False
 
 
 def _opencode_go_base_url(flat_env: Mapping[str, str]) -> str:

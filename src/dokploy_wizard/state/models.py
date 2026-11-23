@@ -78,6 +78,18 @@ def _require_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _optional_string_list(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or item == "" for item in value
+    ):
+        msg = f"Expected list of non-empty strings for '{key}'."
+        raise StateValidationError(msg)
+    return tuple(value)
+
+
 def _require_string_map(
     payload: dict[str, Any], key: str, *, allow_empty_values: bool = False
 ) -> dict[str, str]:
@@ -392,12 +404,15 @@ class DesiredState:
     hostnames: dict[str, str]
     seaweedfs_access_key: str | None
     seaweedfs_secret_key: str | None
-    openclaw_gateway_token: str | None
-    openclaw_channels: tuple[str, ...]
-    openclaw_replicas: int | None
-    my_farm_advisor_channels: tuple[str, ...]
-    my_farm_advisor_replicas: int | None
     shared_core: SharedCorePlan
+    # Per-user LiteLLM workspace-key policy (template MINTPY lane + the
+    # shared-core reconcile sweep): brand-new Coder users get the operator's
+    # models on their minted workspace key only when the flag is on or their
+    # login is allowlisted. The seeded admin is always exempt — its login is
+    # derived from the admin email at apply time, not modeled here. Defaults
+    # keep pre-policy state documents loadable.
+    litellm_model_access_allow_new_users: bool = False
+    litellm_model_access_allowed_users: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.format_version != STATE_FORMAT_VERSION:
@@ -427,6 +442,11 @@ class DesiredState:
         if sorted(self.cloudflare_access_otp_emails) != list(self.cloudflare_access_otp_emails):
             msg = "Cloudflare Access OTP emails must be stored in sorted order."
             raise StateValidationError(msg)
+        if sorted(self.litellm_model_access_allowed_users) != list(
+            self.litellm_model_access_allowed_users
+        ):
+            msg = "LiteLLM model-access allowlist must be stored in sorted order."
+            raise StateValidationError(msg)
         if (self.seaweedfs_access_key is None) != (self.seaweedfs_secret_key is None):
             msg = "SeaweedFS access and secret keys must be provided together."
             raise StateValidationError(msg)
@@ -445,21 +465,6 @@ class DesiredState:
         if not set(self.selected_packs).issubset(self.enabled_packs):
             msg = "Selected packs must be a subset of enabled packs."
             raise StateValidationError(msg)
-        if sorted(self.openclaw_channels) != list(self.openclaw_channels):
-            msg = "OpenClaw channels must be stored in sorted order."
-            raise StateValidationError(msg)
-        if "openclaw" not in self.enabled_packs and self.openclaw_gateway_token is not None:
-            msg = "OpenClaw gateway token must be omitted when the OpenClaw pack is disabled."
-            raise StateValidationError(msg)
-        if sorted(self.my_farm_advisor_channels) != list(self.my_farm_advisor_channels):
-            msg = "My Farm Advisor channels must be stored in sorted order."
-            raise StateValidationError(msg)
-        if self.openclaw_replicas is not None and self.openclaw_replicas < 1:
-            msg = "OpenClaw replicas must be a positive integer when configured."
-            raise StateValidationError(msg)
-        if self.my_farm_advisor_replicas is not None and self.my_farm_advisor_replicas < 1:
-            msg = "My Farm Advisor replicas must be a positive integer when configured."
-            raise StateValidationError(msg)
         if any(value == "" for value in self.hostnames.values()):
             msg = "Desired hostnames must be non-empty strings."
             raise StateValidationError(msg)
@@ -477,17 +482,14 @@ class DesiredState:
             "tailscale_tags": list(self.tailscale_tags),
             "tailscale_subnet_routes": list(self.tailscale_subnet_routes),
             "cloudflare_access_otp_emails": list(self.cloudflare_access_otp_emails),
+            "litellm_model_access_allow_new_users": self.litellm_model_access_allow_new_users,
+            "litellm_model_access_allowed_users": list(self.litellm_model_access_allowed_users),
             "enabled_features": list(self.enabled_features),
             "selected_packs": list(self.selected_packs),
             "enabled_packs": list(self.enabled_packs),
             "hostnames": dict(sorted(self.hostnames.items())),
             "seaweedfs_access_key": self.seaweedfs_access_key,
             "seaweedfs_secret_key": self.seaweedfs_secret_key,
-            "openclaw_gateway_token": self.openclaw_gateway_token,
-            "openclaw_channels": list(self.openclaw_channels),
-            "openclaw_replicas": self.openclaw_replicas,
-            "my_farm_advisor_channels": list(self.my_farm_advisor_channels),
-            "my_farm_advisor_replicas": self.my_farm_advisor_replicas,
             "shared_core": self.shared_core.to_dict(),
         }
 
@@ -515,19 +517,20 @@ class DesiredState:
             cloudflare_access_otp_emails=_require_string_list(
                 payload, "cloudflare_access_otp_emails"
             ),
+            # Optional with defaults: state docs written before the policy
+            # feature must keep loading (and re-serializing) unchanged.
+            litellm_model_access_allow_new_users=_optional_bool(
+                payload, "litellm_model_access_allow_new_users", default=False
+            ),
+            litellm_model_access_allowed_users=_optional_string_list(
+                payload, "litellm_model_access_allowed_users"
+            ),
             enabled_features=_require_string_list(payload, "enabled_features"),
             selected_packs=_require_string_list(payload, "selected_packs"),
             enabled_packs=_require_string_list(payload, "enabled_packs"),
             hostnames=_require_string_map(payload, "hostnames"),
             seaweedfs_access_key=_require_optional_string(payload, "seaweedfs_access_key"),
             seaweedfs_secret_key=_require_optional_string(payload, "seaweedfs_secret_key"),
-            openclaw_gateway_token=_require_optional_string(payload, "openclaw_gateway_token"),
-            openclaw_channels=_require_string_list(payload, "openclaw_channels"),
-            openclaw_replicas=_require_optional_positive_int(payload, "openclaw_replicas"),
-            my_farm_advisor_channels=_require_string_list(payload, "my_farm_advisor_channels"),
-            my_farm_advisor_replicas=_require_optional_positive_int(
-                payload, "my_farm_advisor_replicas"
-            ),
             shared_core=_require_shared_core(payload, "shared_core"),
         )
 
@@ -543,16 +546,6 @@ def _require_shared_core(payload: dict[str, Any], key: str) -> SharedCorePlan:
         raise StateValidationError(str(error)) from error
 
 
-def _require_optional_positive_int(payload: dict[str, Any], key: str) -> int | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, int) or value < 1:
-        msg = f"Expected positive integer or null for '{key}'."
-        raise StateValidationError(msg)
-    return value
-
-
 def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
@@ -563,31 +556,23 @@ def _require_optional_string(payload: dict[str, Any], key: str) -> str | None:
     return value
 
 
+# The Coder workspace issuer is not a chat consumer: it exists so every coder
+# workspace can mint its own virtual key (named after the workspace) during
+# startup, with /key/generate, /key/info, and /key/delete as its only routes.
+# Child keys are what workspaces actually send inference with.
+LITELLM_WORKSPACE_ISSUER_CONSUMER = "coder-workspace-issuer"
+
 LITELLM_CONSUMER_VIRTUAL_KEY_NAMES = (
     "coder-hermes",
-    "coder-kdense",
+    "coder-workspace-issuer",
     "dokploy-ai",
-    "my-farm-advisor",
-    "openclaw",
-    "surfsense",
 )
 
 LITELLM_GENERATED_MASTER_KEY_PREFIX = "sk-litellm-master"
 LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES = {
     "coder-hermes": "sk-litellm-coder-hermes",
-    "coder-kdense": "sk-litellm-coder-kdense",
+    "coder-workspace-issuer": "sk-litellm-coder-workspace-issuer",
     "dokploy-ai": "sk-litellm-dokploy-ai",
-    "my-farm-advisor": "sk-litellm-my-farm-advisor",
-    "openclaw": "sk-litellm-openclaw",
-    "surfsense": "sk-litellm-surfsense",
-}
-
-SURFSENSE_GENERATED_SECRET_PREFIXES = {
-    "db_password": "surfsense-db-password",
-    "jwt_secret": "surfsense-jwt-secret",
-    "searxng_secret": "surfsense-searxng-secret",
-    "secret_key": "surfsense-secret-key",
-    "zero_admin_password": "surfsense-zero-admin-password",
 }
 
 SEAWEEDFS_GENERATED_SECRET_PREFIXES = {
@@ -643,38 +628,6 @@ class LiteLLMGeneratedKeys:
 
 
 @dataclass(frozen=True)
-class SurfSenseGeneratedSecrets:
-    """Wizard-managed SurfSense runtime secrets persisted outside install.env."""
-
-    format_version: int
-    secrets: dict[str, str]
-
-    def __post_init__(self) -> None:
-        if self.format_version != STATE_FORMAT_VERSION:
-            msg = (
-                f"Unsupported format_version {self.format_version}; "
-                f"expected {STATE_FORMAT_VERSION}."
-            )
-            raise StateValidationError(msg)
-        if any(key == "" or value == "" for key, value in self.secrets.items()):
-            msg = "SurfSense generated secrets must use non-empty names and values."
-            raise StateValidationError(msg)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "format_version": self.format_version,
-            "secrets": dict(sorted(self.secrets.items())),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> SurfSenseGeneratedSecrets:
-        return cls(
-            format_version=_require_format_version(payload),
-            secrets=_require_string_map(payload, "secrets"),
-        )
-
-
-@dataclass(frozen=True)
 class SeaweedFsGeneratedSecrets:
     """Wizard-managed SeaweedFS S3 credentials persisted outside install.env."""
 
@@ -706,6 +659,199 @@ class SeaweedFsGeneratedSecrets:
             format_version=_require_format_version(payload),
             access_key=_require_string(payload, "access_key"),
             secret_key=_require_string(payload, "secret_key"),
+        )
+
+
+@dataclass(frozen=True)
+class LiteLLMImagePin:
+    """Operator-approved LiteLLM image pin persisted in the state directory.
+
+    The `upgrade` command writes this document when an operator applies a tag bump,
+    and every later render (install/modify/upgrade) prefers it over the
+    `LITELLM_IMAGE_TAG` env value so a plain rerun never silently reverts the stack.
+    Rollback is the inverse: write the previous tag back and let modify redeploy.
+    """
+
+    format_version: int
+    image: str
+    tag: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if self.image == "" or self.tag == "" or self.updated_at == "":
+            msg = "LiteLLM image pin image, tag, and updated_at must be non-empty strings."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "image": self.image,
+            "tag": self.tag,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> LiteLLMImagePin:
+        return cls(
+            format_version=_require_format_version(payload),
+            image=_require_string(payload, "image"),
+            tag=_require_string(payload, "tag"),
+            updated_at=_require_string(payload, "updated_at"),
+        )
+
+
+@dataclass(frozen=True)
+class FilexProvisionerState:
+    """FileX service account the wizard uses to provision per-user identities.
+
+    The token is an admin-scoped FileX API token: /api/admin delegation is
+    session-or-admin-scope-token only (a plain user token is refused), and the
+    provisioner must be able to create users and mint their child tokens from
+    inside every workspace boot. The token is shown exactly once by FileX at
+    creation, so this document is the only durable copy; if it is lost the next
+    pass label-matches the server-side row, deletes it, and mints a replacement.
+    """
+
+    format_version: int
+    username: str
+    email: str
+    password: str
+    user_id: int
+    token: str
+    token_id: int
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        for name in ("username", "email", "password", "token"):
+            if getattr(self, name) == "":
+                msg = f"FileX provisioner {name} must be a non-empty string."
+                raise StateValidationError(msg)
+        if self.user_id <= 0 or self.token_id <= 0:
+            msg = "FileX provisioner user_id and token_id must be positive integers."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "username": self.username,
+            "email": self.email,
+            "password": self.password,
+            "user_id": self.user_id,
+            "token": self.token,
+            "token_id": self.token_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> FilexProvisionerState:
+        return cls(
+            format_version=_require_format_version(payload),
+            username=_require_string(payload, "username"),
+            email=_require_string(payload, "email"),
+            password=_require_string(payload, "password"),
+            user_id=_require_int(payload, "user_id"),
+            token=_require_string(payload, "token"),
+            token_id=_require_int(payload, "token_id"),
+        )
+
+
+@dataclass(frozen=True)
+class GiteaProvisionerState:
+    """Gitea admin account the wizard uses to provision identities and config.
+
+    The account is created through the in-container CLI (an install-locked
+    Gitea has no signup path), and the token is minted once through the API,
+    so this document is the only durable copy. If it is lost the next pass
+    re-runs the idempotent CLI create, issues a replacement token, and drops
+    the stale one by name.
+    """
+
+    format_version: int
+    username: str
+    email: str
+    password: str
+    token: str
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        for name in ("username", "email", "password", "token"):
+            if getattr(self, name) == "":
+                msg = f"Gitea provisioner {name} must be a non-empty string."
+                raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "username": self.username,
+            "email": self.email,
+            "password": self.password,
+            "token": self.token,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GiteaProvisionerState:
+        return cls(
+            format_version=_require_format_version(payload),
+            username=_require_string(payload, "username"),
+            email=_require_string(payload, "email"),
+            password=_require_string(payload, "password"),
+            token=_require_string(payload, "token"),
+        )
+
+
+@dataclass(frozen=True)
+class GiteaIdentityLedger:
+    """Gitea usernames the wizard has ever provisioned or adopted.
+
+    The identity sync needs an ownership signal the APIs cannot give it:
+    Gitea's admin list shows every account alike, and Coder v2.39.4 makes
+    deleted users unqueryable (measured), so neither side can answer "was
+    this account mine?". Whatever the sync claims (username and primary
+    email exactly matching a current Coder user) lands here and stays, so a
+    later deletion can still disable the account the wizard itself springs —
+    and never a manual one.
+    """
+
+    format_version: int
+    usernames: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.format_version != STATE_FORMAT_VERSION:
+            msg = (
+                f"Unsupported format_version {self.format_version}; "
+                f"expected {STATE_FORMAT_VERSION}."
+            )
+            raise StateValidationError(msg)
+        if any(name == "" for name in self.usernames):
+            msg = "Gitea identity ledger usernames must be non-empty strings."
+            raise StateValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format_version": self.format_version,
+            "usernames": list(self.usernames),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GiteaIdentityLedger:
+        return cls(
+            format_version=_require_format_version(payload),
+            usernames=_require_string_list(payload, "usernames"),
         )
 
 

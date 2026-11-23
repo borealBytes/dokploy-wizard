@@ -327,9 +327,7 @@ def test_validate_preserved_phases_rejects_uninitialized_docuseal_bootstrap_for_
             shared_core_backend=_UNUSED_BACKEND,
             headscale_backend=_UNUSED_BACKEND,
             matrix_backend=_UNUSED_BACKEND,
-            nextcloud_backend=_UNUSED_BACKEND,
             seaweedfs_backend=_UNUSED_BACKEND,
-            openclaw_backend=_UNUSED_BACKEND,
             coder_backend=_UNUSED_BACKEND,
             docuseal_backend=cast(Any, SimpleNamespace(check_health=lambda *, service, url: True)),
         )

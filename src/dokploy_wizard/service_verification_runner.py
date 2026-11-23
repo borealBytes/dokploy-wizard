@@ -9,12 +9,10 @@ from typing import Any, Callable, Literal
 
 from dokploy_wizard import cli
 from dokploy_wizard.bootstrap import LOCAL_HEALTH_URL
-from dokploy_wizard.dokploy import openclaw as openclaw_module
 from dokploy_wizard.litellm import (
     LiteLLMAdminUiCheckError,
     verify_internal_litellm_admin_ui,
 )
-from dokploy_wizard.packs.surfsense import SurfSenseResourceRecord
 from dokploy_wizard.state import (
     RawEnvInput,
     load_litellm_generated_keys,
@@ -68,12 +66,6 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         session_client=dokploy_session_client,
         litellm_generated_keys=litellm_generated_keys,
     )
-    nextcloud_backend = cli._build_nextcloud_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-        session_client=dokploy_session_client,
-    )
     moodle_backend = cli._build_moodle_backend(
         raw_env=raw_env,
         state_dir=state_dir,
@@ -81,6 +73,18 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         session_client=dokploy_session_client,
     )
     docuseal_backend = cli._build_docuseal_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
+    filex_backend = cli._build_filex_backend(
+        raw_env=raw_env,
+        state_dir=state_dir,
+        desired_state=desired_state,
+        session_client=dokploy_session_client,
+    )
+    gitea_backend = cli._build_gitea_backend(
         raw_env=raw_env,
         state_dir=state_dir,
         desired_state=desired_state,
@@ -98,34 +102,11 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
         desired_state=desired_state,
         session_client=dokploy_session_client,
     )
-    openclaw_backend = cli._build_openclaw_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-        session_client=dokploy_session_client,
-        litellm_generated_keys=litellm_generated_keys,
-    )
-    surfsense_backend = cli._build_surfsense_backend(
-        raw_env=raw_env,
-        state_dir=state_dir,
-        desired_state=desired_state,
-        session_client=dokploy_session_client,
-    )
-
     results: list[ServiceVerificationResult] = [
         _verify_shared_core(shared_core_backend=shared_core_backend),
     ]
     if desired_state.shared_core.litellm is not None:
         results.append(_verify_litellm_admin_ui())
-    if "nextcloud" in desired_state.enabled_packs:
-        results.append(
-            _verify_backend_method(
-                backend=nextcloud_backend,
-                method_name="_verify_current_application",
-                service_name="nextcloud",
-                unavailable_detail="Nextcloud verification backend is unavailable.",
-            )
-        )
     if "moodle" in desired_state.enabled_packs:
         results.append(
             _verify_backend_method(
@@ -142,6 +123,24 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
                 method_name="_verify_current_application",
                 service_name="docuseal",
                 unavailable_detail="DocuSeal verification backend is unavailable.",
+            )
+        )
+    if "filex" in desired_state.enabled_packs:
+        results.append(
+            _verify_backend_method(
+                backend=filex_backend,
+                method_name="_verify_current_application",
+                service_name="filex",
+                unavailable_detail="FileX verification backend is unavailable.",
+            )
+        )
+    if "gitea" in desired_state.enabled_packs:
+        results.append(
+            _verify_backend_method(
+                backend=gitea_backend,
+                method_name="_verify_current_application",
+                service_name="gitea",
+                unavailable_detail="Gitea verification backend is unavailable.",
             )
         )
     if "seaweedfs" in desired_state.enabled_packs:
@@ -162,30 +161,6 @@ def run_service_verification(*, env_file: Path, state_dir: Path) -> dict[str, An
                 unavailable_detail="Coder verification backend is unavailable.",
             )
         )
-    if "openclaw" in desired_state.enabled_packs:
-        results.append(
-            _verify_advisor_runtime(
-                backend=openclaw_backend,
-                desired_state=desired_state,
-                variant="openclaw",
-            )
-        )
-    if "my-farm-advisor" in desired_state.enabled_packs:
-        results.append(
-            _verify_advisor_runtime(
-                backend=openclaw_backend,
-                desired_state=desired_state,
-                variant="my-farm-advisor",
-            )
-        )
-    if "surfsense" in desired_state.enabled_packs:
-        results.append(
-            _verify_surfsense_runtime(
-                backend=surfsense_backend,
-                desired_state=desired_state,
-            )
-        )
-
     return {
         "passed": all(result.passed for result in results),
         "results": [result.to_dict() for result in results],
@@ -275,97 +250,6 @@ def _verify_backend_method(
     if not isinstance(result, ServiceVerificationResult):
         raise TypeError(f"Expected ServiceVerificationResult from {service_name} verifier.")
     return result
-
-
-def _verify_advisor_runtime(
-    *, backend: Any, desired_state: Any, variant: str
-) -> ServiceVerificationResult:
-    verifier = getattr(backend, "_verify_service_runtime", None)
-    if not callable(verifier):
-        return make_verification_result(
-            service_name=variant,
-            tier="app",
-            passed=False,
-            detail=f"{variant} verification backend is unavailable.",
-        )
-    hostname_key = "openclaw" if variant == "openclaw" else "my-farm-advisor"
-    hostname = desired_state.hostnames.get(hostname_key)
-    if not hostname:
-        return make_verification_result(
-            service_name=variant,
-            tier="app",
-            passed=False,
-            detail=f"{variant} hostname is unavailable for verification.",
-        )
-    result = verifier(
-        service_name=f"{desired_state.stack_name}-{variant}",
-        variant=variant,
-        url=openclaw_module._external_health_url(hostname=hostname, variant=variant),
-    )
-    if not isinstance(result, ServiceVerificationResult):
-        raise TypeError(f"Expected ServiceVerificationResult from {variant} verifier.")
-    return result
-
-
-def _verify_surfsense_runtime(*, backend: Any, desired_state: Any) -> ServiceVerificationResult:
-    check_health = getattr(backend, "check_health", None)
-    check_internal_health = getattr(backend, "check_internal_health", None)
-    if not callable(check_health) or not callable(check_internal_health):
-        return make_verification_result(
-            service_name="surfsense",
-            tier="app",
-            passed=False,
-            detail="SurfSense verification backend is unavailable.",
-        )
-
-    hostnames = {
-        "frontend": desired_state.hostnames.get("surfsense"),
-        "backend": desired_state.hostnames.get("surfsense-api"),
-        "zero": desired_state.hostnames.get("surfsense-zero"),
-    }
-    missing = sorted(name for name, hostname in hostnames.items() if not hostname)
-    if missing:
-        return make_verification_result(
-            service_name="surfsense",
-            tier="app",
-            passed=False,
-            detail=f"SurfSense verification missing hostname(s): {', '.join(missing)}.",
-        )
-
-    service = SurfSenseResourceRecord(
-        resource_id=f"{desired_state.stack_name}-surfsense",
-        resource_name=f"{desired_state.stack_name}-surfsense",
-    )
-    checks = (
-        (
-            "public frontend app",
-            check_health(service=service, url=f"https://{hostnames['frontend']}/"),
-        ),
-        (
-            "public backend /ready",
-            check_health(service=service, url=f"https://{hostnames['backend']}/ready"),
-        ),
-        (
-            "public zero-cache /keepalive",
-            check_health(service=service, url=f"https://{hostnames['zero']}/keepalive"),
-        ),
-        (
-            "internal SearXNG /healthz",
-            check_internal_health(service=service, url="http://searxng:8080/healthz"),
-        ),
-    )
-    failed = [label for label, passed in checks if not passed]
-    return make_verification_result(
-        service_name="surfsense",
-        tier="app",
-        passed=not failed,
-        detail=(
-            "SurfSense verification passed: public frontend app, public backend /ready, "
-            "public zero-cache /keepalive, and internal SearXNG /healthz are healthy."
-            if not failed
-            else "SurfSense verification failed: " + ", ".join(failed) + "."
-        ),
-    )
 
 
 @dataclass(frozen=True)

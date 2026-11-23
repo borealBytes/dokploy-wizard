@@ -26,7 +26,7 @@ def _write_install_env(path: Path) -> Path:
     path.write_text(
         "ROOT_DOMAIN=example.com\n"
         "STACK_NAME=example\n"
-        "PACKS=nextcloud\n"
+        "PACKS=moodle\n"
         "DOKPLOY_API_URL=http://127.0.0.1:3000\n",
         encoding="utf-8",
     )

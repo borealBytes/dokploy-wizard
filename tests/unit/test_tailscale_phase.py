@@ -151,6 +151,67 @@ def test_shell_tailscale_backend_applies_and_verifies_with_fake_runner() -> None
     assert any(command[:2] == ["tailscale", "up"] for command in runner.commands)
 
 
+def test_shell_tailscale_backend_starts_stopped_daemon_before_up() -> None:
+    # Regression (measured on a from-zero rerun): the package can be present
+    # while tailscaled is stopped, and `tailscale up` then dies with
+    # "failed to connect to local tailscaled". The apply path must start the
+    # unit itself instead of blaming the binary.
+    raw_env = _tailscale_raw_env()
+
+    @dataclass
+    class StoppedDaemonRunner:
+        commands: list[list[str]] = field(default_factory=list)
+        daemon_started: bool = False
+        up_applied: bool = False
+
+        def __call__(self, command: list[str]) -> CommandResult:
+            self.commands.append(command)
+            if command[:3] == ["systemctl", "is-active", "--quiet"]:
+                return CommandResult(
+                    returncode=0 if self.daemon_started else 3, stdout="", stderr=""
+                )
+            if command[:2] == ["systemctl", "start"]:
+                self.daemon_started = True
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command[:2] == ["tailscale", "up"]:
+                self.up_applied = True
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command[:3] == ["tailscale", "status", "--json"]:
+                if not (self.up_applied and self.daemon_started):
+                    return CommandResult(
+                        returncode=1, stdout="", stderr="could not connect to tailsd"
+                    )
+                return CommandResult(
+                    returncode=0,
+                    stdout='{"Self":{"HostName":"wizard-admin","Online":true}}',
+                    stderr="",
+                )
+            if command[:3] == ["tailscale", "ip", "-4"]:
+                return CommandResult(returncode=0, stdout="100.64.0.10\n", stderr="")
+            if command[:3] == ["tailscale", "ip", "-6"]:
+                return CommandResult(returncode=0, stdout="fd7a:115c:a1e0::10\n", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = StoppedDaemonRunner()
+    backend = ShellTailscaleBackend(raw_env, runner=runner)
+
+    resource = backend.apply(
+        resource_name="wizard-admin",
+        auth_key="tskey-auth-123",
+        enable_ssh=False,
+        tags=(),
+        subnet_routes=(),
+    )
+
+    assert resource.resource_name == "wizard-admin"
+    assert ["systemctl", "start", "tailscaled"] in runner.commands
+    # The start must precede the first status probe and the `up`.
+    start_index = runner.commands.index(["systemctl", "start", "tailscaled"])
+    assert start_index < next(
+        i for i, c in enumerate(runner.commands) if c[:2] == ["tailscale", "up"]
+    )
+
+
 def test_shell_tailscale_backend_waits_for_delayed_online_status() -> None:
     raw_env = _tailscale_raw_env(
         TAILSCALE_STATUS_RETRY_ATTEMPTS="3",

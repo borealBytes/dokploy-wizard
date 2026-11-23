@@ -31,15 +31,16 @@ def _replace_line(content: str, key: str, value: str) -> str:
     return content + f"\n{key}={value}\n"
 
 
-def _seed_nextcloud_state(state_dir: Path) -> None:
+def _seed_matrix_state(state_dir: Path) -> None:
     base_raw_input = parse_env_file(FIXTURES_DIR / "nextcloud.env")
     raw_input = RawEnvInput(
         format_version=base_raw_input.format_version,
         values={
             **base_raw_input.values,
+            "ENABLE_MATRIX": "true",
             "CLOUDFLARE_MOCK_EXISTING_TUNNEL_ID": "nextcloud-stack-tunnel",
             "CLOUDFLARE_MOCK_EXISTING_HOSTNAMES": (
-                "dokploy.example.com,headscale.example.com,nextcloud.example.com,office.example.com"
+                "dokploy.example.com,headscale.example.com,matrix.example.com"
             ),
             "HEADSCALE_MOCK_EXISTING_SERVICE_ID": "nextcloud-stack-headscale",
         },
@@ -57,7 +58,7 @@ def _seed_nextcloud_state(state_dir: Path) -> None:
                 "networking",
                 "shared_core",
                 "headscale",
-                "nextcloud",
+                "matrix",
             ),
         ),
     )
@@ -79,13 +80,8 @@ def _seed_nextcloud_state(state_dir: Path) -> None:
                 ),
                 OwnedResource(
                     "cloudflare_dns_record",
-                    "nextcloud-example-com",
-                    "zone:zone-123:nextcloud.example.com",
-                ),
-                OwnedResource(
-                    "cloudflare_dns_record",
-                    "office-example-com",
-                    "zone:zone-123:office.example.com",
+                    "matrix-example-com",
+                    "zone:zone-123:matrix.example.com",
                 ),
                 OwnedResource(
                     "shared_core_network",
@@ -113,39 +109,29 @@ def _seed_nextcloud_state(state_dir: Path) -> None:
                     "stack:nextcloud-stack:headscale",
                 ),
                 OwnedResource(
-                    "nextcloud_service",
-                    "nextcloud-stack-nextcloud",
-                    "stack:nextcloud-stack:nextcloud-service",
+                    "matrix_service",
+                    "nextcloud-stack-matrix",
+                    "stack:nextcloud-stack:matrix-service",
                 ),
                 OwnedResource(
-                    "onlyoffice_service",
-                    "nextcloud-stack-onlyoffice",
-                    "stack:nextcloud-stack:onlyoffice-service",
-                ),
-                OwnedResource(
-                    "nextcloud_volume",
-                    "nextcloud-stack-nextcloud-data",
-                    "stack:nextcloud-stack:nextcloud-volume",
-                ),
-                OwnedResource(
-                    "onlyoffice_volume",
-                    "nextcloud-stack-onlyoffice-data",
-                    "stack:nextcloud-stack:onlyoffice-volume",
+                    "matrix_data",
+                    "nextcloud-stack-matrix-data",
+                    "stack:nextcloud-stack:matrix-data",
                 ),
             ),
         ),
     )
 
 
-def test_modify_disable_nextcloud_deletes_runtime_and_preserves_data(tmp_path: Path) -> None:
+def test_modify_disable_matrix_deletes_runtime_and_preserves_data(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    _seed_nextcloud_state(state_dir)
-    modify_env = tmp_path / "disable-nextcloud.env"
+    _seed_matrix_state(state_dir)
+    modify_env = tmp_path / "disable-matrix.env"
     base_env = (FIXTURES_DIR / "nextcloud.env").read_text(encoding="utf-8")
-    updated_env = _replace_line(base_env, "ENABLE_NEXTCLOUD", "false")
+    updated_env = _replace_line(base_env, "ENABLE_MATRIX", "false")
     updated_env += (
         "\nCLOUDFLARE_MOCK_EXISTING_TUNNEL_ID=nextcloud-stack-tunnel"
-        "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com,nextcloud.example.com,office.example.com"
+        "\nCLOUDFLARE_MOCK_EXISTING_HOSTNAMES=dokploy.example.com,headscale.example.com,matrix.example.com"
         "\nHEADSCALE_MOCK_EXISTING_SERVICE_ID=nextcloud-stack-headscale\n"
     )
     modify_env.write_text(updated_env, encoding="utf-8")
@@ -165,16 +151,14 @@ def test_modify_disable_nextcloud_deletes_runtime_and_preserves_data(tmp_path: P
     }
     assert deleted_types == {
         "cloudflare_dns_record",
-        "nextcloud_service",
-        "onlyoffice_service",
+        "matrix_service",
     }
     assert loaded.ownership_ledger is not None
     assert {resource.resource_type for resource in loaded.ownership_ledger.resources} == {
         "cloudflare_tunnel",
         "cloudflare_dns_record",
         "headscale_service",
-        "nextcloud_volume",
-        "onlyoffice_volume",
+        "matrix_data",
         "shared_core_litellm",
         "shared_core_network",
         "shared_core_postgres",

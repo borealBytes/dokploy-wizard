@@ -95,9 +95,41 @@ def test_help_lists_expected_subcommands() -> None:
     assert "install" in result.stdout
     assert "modify" in result.stdout
     assert "uninstall" in result.stdout
+    assert "upgrade" in result.stdout
     assert "inspect-state" in result.stdout
     assert "proof" in result.stdout
+    assert "sync-identities" in result.stdout
     assert result.stderr == ""
+
+
+def test_build_sync_identities_command_targets_remote_state() -> None:
+    remote_cli = import_remote_cli_module()
+    session = remote_cli.RemoteTransportSession(
+        transport=object(),
+        remote_root="/root/dokploy-wizard",
+    )
+
+    command = remote_cli._build_sync_identities_command(session)
+
+    assert "sync-identities" in command
+    assert "--env-file /root/dokploy-wizard/.install.env" in command
+    assert "--state-dir /root/dokploy-wizard/state" in command
+
+
+def test_build_modify_command_forwards_force_phase() -> None:
+    remote_cli = import_remote_cli_module()
+    session = remote_cli.RemoteTransportSession(
+        transport=object(),
+        remote_root="/root/dokploy-wizard",
+    )
+
+    command = remote_cli._build_modify_command(session, force_phase="coder")
+
+    assert "--force-phase coder" in command
+
+    plain = remote_cli._build_modify_command(session)
+
+    assert "--force-phase" not in plain
 
 
 def test_remote_parser_defaults_match_contract() -> None:
@@ -131,7 +163,7 @@ def test_remote_parser_defaults_match_contract() -> None:
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> None:
     remote_cli = import_remote_cli_module()
@@ -144,7 +176,7 @@ def test_remote_parser_accepts_verbose_for_each_subcommand(subcommand: str) -> N
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_remote_parser_accepts_quiet_remote_output_for_each_subcommand(
     subcommand: str,
@@ -163,7 +195,7 @@ def test_remote_stream_lines_are_shown_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     captured = _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -190,7 +222,7 @@ def test_quiet_remote_output_suppresses_stream_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     captured = _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -220,7 +252,7 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud,coder")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,matrix,moodle,coder")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -239,10 +271,14 @@ def test_successful_lifecycle_prints_expected_service_urls_for_enabled_service_l
     assert exit_code == 0
     assert "[remote] expected service URLs:" in stderr
     assert "ready for use" not in stderr
-    assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
-    assert "[remote]   Coder: https://coder.openmerge.me/" in stderr
-    assert "[remote]   My Farm Advisor/Farm: https://farm.openmerge.me/" in stderr
+    dokploy_link = stderr.index("[remote]   Dokploy: https://dokploy.openmerge.me/")
+    coder_link = stderr.index("[remote]   Coder: https://coder.openmerge.me/")
+    docuseal_link = stderr.index("[remote]   DocuSeal: https://docuseal.openmerge.me/")
+    moodle_link = stderr.index("[remote]   Moodle: https://moodle.openmerge.me/")
+    # Links print in the helper's fixed survivor order regardless of pack selection order.
+    assert dokploy_link < coder_link < docuseal_link < moodle_link
+    # Matrix is chat infrastructure, not a headline service: no link slot.
+    assert "Matrix:" not in stderr
 
 
 @pytest.mark.parametrize(
@@ -261,7 +297,7 @@ def test_lifecycle_prints_expected_service_urls_before_long_mutation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="my-farm-advisor,nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="docuseal,matrix")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -292,7 +328,7 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     remote_cli = import_remote_cli_module()
-    env_file = _write_remote_env(tmp_path, packs="nextcloud")
+    env_file = _write_remote_env(tmp_path, packs="moodle")
     _patch_successful_remote_run(monkeypatch, remote_cli)
 
     exit_code = remote_cli.main(
@@ -312,14 +348,14 @@ def test_successful_lifecycle_expected_service_urls_omits_disabled_pack_links(
     assert "[remote] expected service URLs:" in stderr
     assert "ready for use" not in stderr
     assert "[remote]   Dokploy: https://dokploy.openmerge.me/" in stderr
-    assert "[remote]   Nextcloud: https://nextcloud.openmerge.me/" in stderr
+    assert "[remote]   Moodle: https://moodle.openmerge.me/" in stderr
     assert "Coder:" not in stderr
-    assert "My Farm Advisor/Farm:" not in stderr
+    assert "DocuSeal:" not in stderr
 
 
 @pytest.mark.parametrize(
     "subcommand",
-    ["install", "modify", "uninstall", "inspect-state", "proof"],
+    ["install", "modify", "uninstall", "upgrade", "inspect-state", "proof"],
 )
 def test_each_remote_subcommand_has_help(subcommand: str) -> None:
     assert CLI.exists(), f"expected remote CLI wrapper at {CLI}"
@@ -344,15 +380,15 @@ def test_missing_host_fails_without_echoing_password(tmp_path: Path) -> None:
     assert password not in result.stderr
 
 
-@pytest.mark.parametrize("subcommand", ["install", "modify", "proof"])
+@pytest.mark.parametrize("subcommand", ["install", "modify", "proof", "upgrade"])
 def test_lifecycle_commands_accept_positional_env_file(subcommand: str) -> None:
     remote_cli = import_remote_cli_module()
     parser = remote_cli.build_parser()
 
-    args = parser.parse_args([subcommand, "./.install-my-farm-advisor-min.env"])
+    args = parser.parse_args([subcommand, "./.install-min.env"])
     remote_cli._validate_args(parser, args)
 
-    assert str(args.env_file) == ".install-my-farm-advisor-min.env"
+    assert str(args.env_file) == ".install-min.env"
 
 
 def test_runtime_args_derive_host_and_password_from_positional_env_file(tmp_path: Path) -> None:
@@ -567,28 +603,28 @@ def test_create_repo_archive_excludes_local_env_backups(tmp_path: Path) -> None:
 def test_runtime_error_redaction_masks_env_payload_values() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    sentinel = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    sentinel = "SECRET_TEST_MOODLE_SMTP_VALUE"
 
     message = remote_cli._redact_runtime_message(
         (
             f"ssh failed with {password}\n"
-            "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-            "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456\n"
-            f"OPENCLAW_PROVIDER_API_KEY={sentinel}"
+            "# dokploy-wizard-env marker=dokploy-wizard owner=moodle "
+            "key=MOODLE_SMTP_PASSWORD fingerprint=sha256:def456\n"
+            f"MOODLE_SMTP_PASSWORD={sentinel}"
         ),
         password=password,
     )
 
     assert password not in message
     assert sentinel not in message
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in message
+    assert "MOODLE_SMTP_PASSWORD=<REDACTED>" in message
     assert "fingerprint=sha256:def456" in message
 
 
 def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -> None:
     remote_cli = import_remote_cli_module()
     password = "super-secret-password"
-    env_secret = "SECRET_TEST_OPENCLAW_PROVIDER_VALUE"
+    env_secret = "SECRET_TEST_MOODLE_SMTP_VALUE"
     docker_pat = "ghp_SECRETTESTDOCKERPATVALUE"
     stream = io.StringIO()
     reporter = remote_cli._RemoteProgressReporter(
@@ -601,13 +637,13 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        "# dokploy-wizard-env marker=dokploy-wizard owner=openclaw "
-        "key=OPENCLAW_PROVIDER_API_KEY fingerprint=sha256:def456",
+        "# dokploy-wizard-env marker=dokploy-wizard owner=moodle "
+        "key=MOODLE_SMTP_PASSWORD fingerprint=sha256:def456",
     )
     reporter.remote_output(
         "mutate-install",
         "stdout",
-        f"OPENCLAW_PROVIDER_API_KEY={env_secret}",
+        f"MOODLE_SMTP_PASSWORD={env_secret}",
     )
     reporter.remote_output("mutate-install", "stderr", f"DOCKER_PAT={docker_pat}")
 
@@ -615,7 +651,7 @@ def test_verbose_progress_output_redacts_password_env_payload_and_docker_pat() -
     assert password not in output
     assert env_secret not in output
     assert docker_pat not in output
-    assert "OPENCLAW_PROVIDER_API_KEY=<REDACTED>" in output
+    assert "MOODLE_SMTP_PASSWORD=<REDACTED>" in output
     assert "DOCKER_PAT=<REDACTED>" in output
 
 
@@ -632,3 +668,123 @@ def test_non_verbose_progress_output_suppresses_remote_stream_lines() -> None:
     reporter.remote_output("mutate-install", "stdout", "normal install output")
 
     assert stream.getvalue() == ""
+
+
+class _RecordingRemoteTransport(_FakeRemoteTransport):
+    """Fake transport that also captures every command sent to the host."""
+
+    def __init__(self) -> None:
+        super().__init__(output_callback=None)
+        self.commands: list[tuple[str, str]] = []
+
+    def run(self, subcommand: str, command: str) -> None:
+        self.commands.append((subcommand, command))
+
+
+def _patch_recording_remote_run(
+    monkeypatch: pytest.MonkeyPatch,
+    remote_cli: ModuleType,
+) -> _RecordingRemoteTransport:
+    transport = _RecordingRemoteTransport()
+
+    monkeypatch.setattr(
+        remote_cli.ParamikoRemoteTransport,
+        "connect",
+        lambda **_kwargs: transport,
+    )
+    monkeypatch.setattr(remote_cli, "_upload_remote_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_cli, "_extract_remote_bundle", lambda **_kwargs: None)
+    return transport
+
+
+def test_remote_upgrade_check_builds_read_only_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
+    transport = _patch_recording_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "upgrade",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+            "--check",
+        ]
+    )
+
+    assert exit_code == 0
+    assert [subcommand for subcommand, _ in transport.commands] == ["upgrade"]
+    command = transport.commands[0][1]
+    assert "./bin/dokploy-wizard upgrade" in command
+    assert "--check" in command
+    assert "--non-interactive" in command
+    assert "--litellm" not in command
+    assert "--confirm-file" not in command
+
+
+def test_remote_upgrade_apply_passes_tag_allow_major_and_uploaded_confirm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
+    confirm_file = tmp_path / "upgrade.confirm"
+    confirm_file.write_text("upgrade the stack\n", encoding="utf-8")
+    transport = _patch_recording_remote_run(monkeypatch, remote_cli)
+
+    exit_code = remote_cli.main(
+        [
+            "upgrade",
+            "--host",
+            "example.com",
+            "--password",
+            "super-secret-password",
+            "--env-file",
+            str(env_file),
+            "--litellm",
+            "v1.84.0-stable",
+            "--allow-major",
+            "--confirm-file",
+            str(confirm_file),
+        ]
+    )
+
+    assert exit_code == 0
+    command = transport.commands[0][1]
+    assert "--litellm" in command and "v1.84.0-stable" in command
+    assert "--allow-major" in command
+    assert "--check" not in command
+    # The confirmation file is uploaded and referenced by its remote path.
+    assert f"--confirm-file {confirm_file}" in command
+
+
+def test_remote_upgrade_litellm_requires_confirm_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote_cli = import_remote_cli_module()
+    env_file = _write_remote_env(tmp_path, packs="moodle,coder")
+
+    with pytest.raises(SystemExit) as exit_info:
+        remote_cli.main(
+            [
+                "upgrade",
+                "--host",
+                "example.com",
+                "--password",
+                "super-secret-password",
+                "--env-file",
+                str(env_file),
+                "--litellm",
+                "v1.84.0-stable",
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "--confirm-file" in capsys.readouterr().err

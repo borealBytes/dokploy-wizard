@@ -22,13 +22,13 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
             ),
         ),
         ServiceVerificationCheck(
-            service_id="nextcloud",
-            label="Nextcloud / OnlyOffice",
+            service_id="matrix",
+            label="Matrix",
             verify=lambda: make_verification_result(
-                service_name="wizard-nextcloud",
+                service_name="wizard-matrix",
                 tier="downstream",
                 passed=True,
-                detail="Nextcloud is ready.",
+                detail="Matrix is ready.",
             ),
         ),
         ServiceVerificationCheck(
@@ -42,23 +42,23 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
             ),
         ),
         ServiceVerificationCheck(
-            service_id="openclaw",
-            label="OpenClaw",
+            service_id="matrix",
+            label="Matrix",
             verify=lambda: make_verification_result(
-                service_name="wizard-openclaw",
+                service_name="wizard-matrix",
                 tier="app",
                 passed=True,
-                detail="OpenClaw is ready.",
+                detail="Matrix is ready.",
             ),
         ),
         ServiceVerificationCheck(
-            service_id="my-farm-advisor",
-            label="My Farm Advisor",
+            service_id="docuseal",
+            label="DocuSeal",
             verify=lambda: make_verification_result(
-                service_name="wizard-my-farm-advisor",
+                service_name="wizard-docuseal",
                 tier="app",
                 passed=True,
-                detail="My Farm Advisor is ready.",
+                detail="DocuSeal is ready.",
             ),
         ),
         ServiceVerificationCheck(
@@ -81,10 +81,10 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
     assert payload["summary"] == {"fail": 0, "pass": 6}
     assert [entry["service_id"] for entry in payload["entries"]] == [
         "shared-core",
-        "nextcloud",
+        "matrix",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
+        "matrix",
+        "docuseal",
         "seaweedfs",
     ]
     assert all(entry["status"] == "pass" for entry in payload["entries"])
@@ -93,21 +93,21 @@ def test_service_verification_runner_passes_all_enabled_services() -> None:
 def test_service_verification_runner_fails_with_redacted_detail() -> None:
     checks = (
         ServiceVerificationCheck(
-            service_id="openclaw",
-            label="OpenClaw",
+            service_id="matrix",
+            label="Matrix",
             verify=lambda: make_verification_result(
-                service_name="wizard-openclaw",
+                service_name="wizard-matrix",
                 tier="app",
                 passed=False,
                 detail=(
-                    "OPENCLAW_VIRTUAL_KEY=sk-secret-123 failed with "
+                    "MATRIX_CLIENT_SECRET=sk-secret-123 failed with "
                     "authorization: bearer sk-secret-123"
                 ),
                 evidence_command=[
                     "curl",
                     "-H",
                     "Authorization: Bearer sk-secret-123",
-                    "https://openclaw.example.com/health",
+                    "https://matrix.example.com/health",
                 ],
             ),
         ),
@@ -120,7 +120,7 @@ def test_service_verification_runner_fails_with_redacted_detail() -> None:
     assert report.passed is False
     assert payload["status"] == "fail"
     assert payload["summary"] == {"fail": 1, "pass": 0}
-    assert entry["service_id"] == "openclaw"
+    assert entry["service_id"] == "matrix"
     assert entry["status"] == "fail"
     assert "sk-secret-123" not in entry["detail"]
     assert "<REDACTED>" in entry["detail"]

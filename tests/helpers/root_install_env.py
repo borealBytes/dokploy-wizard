@@ -9,10 +9,9 @@ def root_install_env() -> RawEnvInput:
         values={
             "STACK_NAME": "openmerge",
             "ROOT_DOMAIN": "openmerge.me",
-            "PACKS": "my-farm-advisor,nextcloud,openclaw,coder,seaweedfs",
+            "PACKS": "coder,seaweedfs",
             "CODER_WILDCARD_SUBDOMAIN": "*",
             "ENABLE_HEADSCALE": "false",
-            "ENABLE_MY_FARM_ADVISOR": "true",
             "ENABLE_TAILSCALE": "true",
             "TAILSCALE_HOSTNAME": "openmerge",
             "TAILSCALE_AUTH_KEY": "tskey-auth-123",
@@ -31,6 +30,9 @@ def root_install_env() -> RawEnvInput:
             "CLOUDFLARE_API_TOKEN": "token-123",
             "CLOUDFLARE_ZONE_ID": "zone-123",
             "CLOUDFLARE_TUNNEL_NAME": "openmerge-tunnel",
+            # Access OTP is opt-in; the synthetic root env opts in so contract
+            # tests keep exercising the gated path.
+            "CLOUDFLARE_ACCESS_OTP_EMAILS": "operator@example.com",
             "CLOUDFLARE_MOCK_ACCOUNT_OK": "true",
             "CLOUDFLARE_MOCK_ZONE_OK": "true",
             "DOKPLOY_API_URL": "https://dokploy.example.com",
@@ -42,8 +44,6 @@ def root_install_env() -> RawEnvInput:
             "DOKPLOY_ADMIN_PASSWORD": "super-secret-password",
             "SEAWEEDFS_ACCESS_KEY": "seaweed-access",
             "SEAWEEDFS_SECRET_KEY": "seaweed-secret",
-            "OPENCLAW_CHANNELS": "telegram",
-            "ADVISOR_GATEWAY_PASSWORD": "advisor-password",
             "AI_DEFAULT_API_KEY": "shared-ai-key",
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
             "LITELLM_LOCAL_BASE_URL": "http://local-model.internal:61434/v1",
@@ -56,9 +56,6 @@ def root_install_env() -> RawEnvInput:
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini,"
                 "openrouter/healer-alpha=openrouter/anthropic/claude-3.5-sonnet"
             ),
-            "MY_FARM_ADVISOR_SUBDOMAIN": "farm",
-            "MY_FARM_ADVISOR_CHANNELS": "telegram",
-            "MY_FARM_ADVISOR_PRIMARY_MODEL": "openrouter/hunter-alpha",
             "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
         },
     )

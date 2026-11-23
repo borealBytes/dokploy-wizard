@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,49 +11,47 @@ import pytest
 
 import dokploy_wizard.cli as cli
 from dokploy_wizard.litellm.admin import (
+    WORKSPACE_KEY_ACCESS_GROUP,
+    WORKSPACE_KEY_DENY_MODEL,
+    WORKSPACE_KEY_GRANTED_MODELS,
     LiteLLMAdminError,
     LiteLLMGatewayManager,
     LiteLLMTeamRecord,
+    LiteLLMUserAssignment,
+    LiteLLMUserRecord,
     LiteLLMVirtualKeyRecord,
+    build_litellm_workspace_key_policy,
 )
 from dokploy_wizard.state import (
     LITELLM_GENERATED_KEYS_FILE,
     SEAWEEDFS_GENERATED_SECRETS_FILE,
-    SURFSENSE_GENERATED_SECRETS_FILE,
     LiteLLMGeneratedKeys,
     RawEnvInput,
     SeaweedFsGeneratedSecrets,
-    SurfSenseGeneratedSecrets,
     ensure_litellm_generated_keys,
     ensure_seaweedfs_generated_secrets,
-    ensure_surfsense_generated_secrets,
     resolve_desired_state,
     write_litellm_generated_keys,
     write_seaweedfs_generated_secrets,
-    write_surfsense_generated_secrets,
 )
 from dokploy_wizard.state.models import (
+    LITELLM_WORKSPACE_ISSUER_CONSUMER,
     SEAWEEDFS_GENERATED_SECRET_PREFIXES,
-    SURFSENSE_GENERATED_SECRET_PREFIXES,
 )
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
-_MANAGED_METADATA = {"consumer": "my-farm-advisor", "managed_by": "dokploy-wizard"}
+_MANAGED_METADATA = {"consumer": "coder-hermes", "managed_by": "dokploy-wizard"}
 _EXPECTED_LITELLM_CONSUMERS = {
     "coder-hermes",
-    "coder-kdense",
+    # Not a chat consumer: the scoped key every Coder workspace mints its own
+    # child key with (see the template MINTPY block).
+    "coder-workspace-issuer",
     "dokploy-ai",
-    "my-farm-advisor",
-    "openclaw",
-    "surfsense",
-}
-_EXPECTED_SURFSENSE_GENERATED_SECRET_NAMES = {
-    "db_password",
-    "jwt_secret",
-    "searxng_secret",
-    "secret_key",
-    "zero_admin_password",
 }
 _EXPECTED_SEAWEEDFS_GENERATED_SECRET_NAMES = {"access_key", "secret_key"}
+
+
+
 
 
 def _raw_env() -> RawEnvInput:
@@ -61,10 +60,9 @@ def _raw_env() -> RawEnvInput:
         values={
             "STACK_NAME": "wizard-stack",
             "ROOT_DOMAIN": "example.com",
-            "PACKS": "coder,my-farm-advisor,openclaw",
+            "PACKS": "coder,matrix",
             "AI_DEFAULT_API_KEY": "shared-ai-key",
             "AI_DEFAULT_BASE_URL": "https://models.example.com/v1",
-            "OPENCLAW_CHANNELS": "telegram",
         },
     )
 
@@ -112,16 +110,15 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
 
     assert (state_dir / LITELLM_GENERATED_KEYS_FILE).exists()
     assert set(generated_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert (
+        generated_keys.virtual_keys["coder-workspace-issuer"].startswith(
+            "sk-litellm-coder-workspace-issuer"
+        )
+    )
     assert generated_keys.master_key.startswith("sk-litellm-master-")
     assert generated_keys.salt_key.startswith("litellm-salt-")
     assert generated_keys.virtual_keys["coder-hermes"].startswith("sk-litellm-coder-hermes-")
-    assert generated_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
     assert generated_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
-    assert generated_keys.virtual_keys["my-farm-advisor"].startswith(
-        "sk-litellm-my-farm-advisor-"
-    )
-    assert generated_keys.virtual_keys["openclaw"].startswith("sk-litellm-openclaw-")
-    assert generated_keys.virtual_keys["surfsense"].startswith("sk-litellm-surfsense-")
     assert all(value for value in generated_keys.virtual_keys.values())
 
     existing_keys = LiteLLMGeneratedKeys(
@@ -130,18 +127,23 @@ def test_empty_state_generates_consumer_keys_and_existing_state_reuses_them(
         salt_key="existing-salt-key",
         virtual_keys={
             "coder-hermes": "sk-<redacted-coder-hermes-existing>",
-            "coder-kdense": "sk-<redacted-coder-kdense-existing>",
             "dokploy-ai": "sk-<redacted-dokploy-ai-existing>",
-            "my-farm-advisor": "sk-<redacted-my-farm-advisor-existing>",
-            "openclaw": "sk-<redacted-openclaw-existing>",
-            "surfsense": "sk-<redacted-surfsense-existing>",
         },
     )
     write_litellm_generated_keys(state_dir, existing_keys)
 
     reused_keys = ensure_litellm_generated_keys(state_dir)
 
-    assert reused_keys == existing_keys
+    # A state that predates a consumer slot reuses every existing value
+    # verbatim and only grows the new consumer slot.
+    assert reused_keys.master_key == existing_keys.master_key
+    assert reused_keys.salt_key == existing_keys.salt_key
+    for consumer, key in existing_keys.virtual_keys.items():
+        assert reused_keys.virtual_keys[consumer] == key
+    assert set(reused_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert reused_keys.virtual_keys["coder-workspace-issuer"].startswith(
+        "sk-litellm-coder-workspace-issuer-"
+    )
 
 
 def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Path) -> None:
@@ -152,11 +154,8 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
         salt_key="existing-salt-key",
         virtual_keys={
             "coder-hermes": "sk-<redacted-coder-hermes-existing>",
-            "coder-kdense": "legacy-coder-kdense-key",
-            "dokploy-ai": "legacy-dokploy-ai-key",
-            "my-farm-advisor": "345elegacy5043",
-            "openclaw": "existing-openclaw-key",
-            "surfsense": "legacy-surfsense-key",
+            "coder-workspace-issuer": "legacy-workspace-issuer-key",
+            "dokploy-ai": "345elegacy5043",
         },
     )
     write_litellm_generated_keys(state_dir, legacy_keys)
@@ -167,18 +166,11 @@ def test_ensure_litellm_generated_keys_repairs_legacy_non_sk_values(tmp_path: Pa
     assert repaired_keys.master_key != legacy_keys.master_key
     assert repaired_keys.salt_key == legacy_keys.salt_key
     assert repaired_keys.virtual_keys["coder-hermes"] == "sk-<redacted-coder-hermes-existing>"
-    assert repaired_keys.virtual_keys["coder-kdense"].startswith("sk-litellm-coder-kdense-")
-    assert repaired_keys.virtual_keys["coder-kdense"] != "legacy-coder-kdense-key"
+    issuer_key = repaired_keys.virtual_keys["coder-workspace-issuer"]
+    assert issuer_key.startswith("sk-litellm-coder-workspace-issuer-")
+    assert issuer_key != "legacy-workspace-issuer-key"
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
-    assert repaired_keys.virtual_keys["dokploy-ai"] != "legacy-dokploy-ai-key"
-    assert repaired_keys.virtual_keys["my-farm-advisor"].startswith(
-        "sk-litellm-my-farm-advisor-"
-    )
-    assert repaired_keys.virtual_keys["my-farm-advisor"] != "345elegacy5043"
-    assert repaired_keys.virtual_keys["openclaw"].startswith("sk-litellm-openclaw-")
-    assert repaired_keys.virtual_keys["openclaw"] != "existing-openclaw-key"
-    assert repaired_keys.virtual_keys["surfsense"].startswith("sk-litellm-surfsense-")
-    assert repaired_keys.virtual_keys["surfsense"] != "legacy-surfsense-key"
+    assert repaired_keys.virtual_keys["dokploy-ai"] != "345elegacy5043"
 
     assert ensure_litellm_generated_keys(state_dir) == repaired_keys
 
@@ -191,8 +183,10 @@ def test_ensure_litellm_generated_keys_repairs_existing_state_missing_dokploy_ai
     legacy_virtual_keys = {
         "coder-hermes": "sk-<redacted-coder-hermes-existing>",
         "coder-kdense": "sk-<redacted-coder-kdense-existing>",
-        "my-farm-advisor": "sk-<redacted-my-farm-advisor-existing>",
-        "openclaw": "sk-<redacted-openclaw-existing>",
+        # State written by an older wizard carries consumer aliases the current
+        # build no longer issues keys for; repair prunes them so ghost names
+        # never reach the gateway key sync or the model-sync sidecar again.
+        "retired-pack-consumer": "sk-<redacted-retired-pack-consumer-existing>",
     }
     legacy_payload = {
         "format_version": 1,
@@ -208,54 +202,14 @@ def test_ensure_litellm_generated_keys_repairs_existing_state_missing_dokploy_ai
     repaired_keys = ensure_litellm_generated_keys(state_dir)
 
     assert set(repaired_keys.virtual_keys) == _EXPECTED_LITELLM_CONSUMERS
+    assert "retired-pack-consumer" not in repaired_keys.virtual_keys
+    # A consumer retired with its template is pruned exactly like an unknown
+    # ghost name: repair only ever converges on the current consumer list.
+    assert "coder-kdense" not in repaired_keys.virtual_keys
     assert repaired_keys.master_key == legacy_payload["master_key"]
     assert repaired_keys.salt_key == legacy_payload["salt_key"]
-    for consumer in ("coder-hermes", "coder-kdense", "my-farm-advisor", "openclaw"):
-        assert repaired_keys.virtual_keys[consumer] == legacy_virtual_keys[consumer]
+    assert repaired_keys.virtual_keys["coder-hermes"] == legacy_virtual_keys["coder-hermes"]
     assert repaired_keys.virtual_keys["dokploy-ai"].startswith("sk-litellm-dokploy-ai-")
-    assert repaired_keys.virtual_keys["surfsense"].startswith("sk-litellm-surfsense-")
-
-
-def test_surfsense_generated_app_secrets_are_state_backed_and_repaired(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    install_env = tmp_path / ".install.env"
-    install_env.write_text("STACK_NAME=wizard-stack\nROOT_DOMAIN=example.com\n", encoding="utf-8")
-    original_install_env = install_env.read_text(encoding="utf-8")
-
-    first_secrets = ensure_surfsense_generated_secrets(state_dir)
-    second_secrets = ensure_surfsense_generated_secrets(state_dir)
-
-    assert first_secrets == second_secrets
-    assert install_env.read_text(encoding="utf-8") == original_install_env
-    assert set(SURFSENSE_GENERATED_SECRET_PREFIXES) == _EXPECTED_SURFSENSE_GENERATED_SECRET_NAMES
-    assert set(first_secrets.secrets) == _EXPECTED_SURFSENSE_GENERATED_SECRET_NAMES
-    for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items():
-        assert first_secrets.secrets[secret_name].startswith(f"{prefix}-")
-    assert (state_dir / SURFSENSE_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
-
-    legacy_secrets = SurfSenseGeneratedSecrets(
-        format_version=1,
-        secrets={
-            "db_password": "surfsense-db-password-existing",
-            "secret_key": "surfsense-secret-key-existing",
-        },
-    )
-    write_surfsense_generated_secrets(state_dir, legacy_secrets)
-
-    repaired_secrets = ensure_surfsense_generated_secrets(state_dir)
-
-    assert set(repaired_secrets.secrets) == _EXPECTED_SURFSENSE_GENERATED_SECRET_NAMES
-    assert repaired_secrets.secrets["db_password"] == "surfsense-db-password-existing"
-    assert repaired_secrets.secrets["secret_key"] == "surfsense-secret-key-existing"
-    assert repaired_secrets.secrets["jwt_secret"].startswith("surfsense-jwt-secret-")
-    assert repaired_secrets.secrets["searxng_secret"].startswith("surfsense-searxng-secret-")
-    assert repaired_secrets.secrets["zero_admin_password"].startswith(
-        "surfsense-zero-admin-password-"
-    )
-    assert install_env.read_text(encoding="utf-8") == original_install_env
-    assert (state_dir / SURFSENSE_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
 
 
 def test_seaweedfs_generated_s3_credentials_are_state_backed_and_repaired(
@@ -293,7 +247,7 @@ def test_seaweedfs_generated_s3_credentials_are_state_backed_and_repaired(
     assert install_env.read_text(encoding="utf-8") == original_install_env
     assert (state_dir / SEAWEEDFS_GENERATED_SECRETS_FILE).stat().st_mode & 0o777 == 0o600
 
-class FakeLiteLLMAdminApi:
+class FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(
         self,
         *,
@@ -306,6 +260,9 @@ class FakeLiteLLMAdminApi:
         self.fail_create_key_for = fail_create_key_for
         self.created_teams: list[LiteLLMTeamRecord] = []
         self.created_keys: list[LiteLLMVirtualKeyRecord] = []
+        self.created_key_routes: dict[str, tuple[str, ...] | None] = {}
+        self.deleted_team_ids: list[str] = []
+        self.updated_key_routes: dict[str, tuple[str, ...] | None] = {}
         self.updated_teams: list[LiteLLMTeamRecord] = []
         self.updated_keys: list[LiteLLMVirtualKeyRecord] = []
         self.deleted_key_aliases: list[str] = []
@@ -362,15 +319,19 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         if self.fail_create_key_for == key_alias:
             raise LiteLLMAdminError(f"failed to create key {key_alias}")
+        self.created_key_routes[key_alias] = allowed_routes
         record = LiteLLMVirtualKeyRecord(
             key=key,
             key_alias=key_alias,
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         self.created_keys.append(record)
@@ -384,6 +345,8 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -391,7 +354,22 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
+        self.updated_key_routes[key_alias] = allowed_routes
+        # Alias migration: the gateway moves the record itself, so a renamed
+        # key leaves no ghost under the old alias. The store is alias-keyed,
+        # so identify the row the way the lane does — one mint per
+        # (owner, workspace) pair — and drop its prior name.
+        pair = (record.metadata.get("coder_owner"), record.metadata.get("coder_workspace"))
+        if pair[0] is not None:
+            for stale in [
+                a
+                for a, r in self._keys.items()
+                if a != key_alias
+                and (r.metadata.get("coder_owner"), r.metadata.get("coder_workspace")) == pair
+            ]:
+                del self._keys[stale]
         self._keys[key_alias] = record
         self.updated_keys.append(record)
         return record
@@ -399,6 +377,12 @@ class FakeLiteLLMAdminApi:
     def delete_key(self, *, key_alias: str) -> None:
         self.deleted_key_aliases.append(key_alias)
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        self.deleted_team_ids.append(team_id)
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
     def visible_models_for_key(self, key_alias: str) -> tuple[str, ...]:
         return self._keys[key_alias].models
@@ -408,8 +392,8 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=(
                     "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
@@ -418,9 +402,9 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="existing-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="existing-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=(
                     "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
@@ -432,11 +416,11 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
 
     reconciled = manager.reconcile_virtual_keys(
         generated_keys={
-            "my-farm-advisor": "existing-my-farm-key",
+            "coder-hermes": "existing-coder-hermes-key",
             "coder-kdense": "new-coder-kdense-key",
         },
         consumer_model_allowlists={
-            "my-farm-advisor": (
+            "coder-hermes": (
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             ),
@@ -459,9 +443,9 @@ def test_existing_virtual_key_is_reused_and_missing_key_is_created() -> None:
             metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
         )
     ]
-    assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
+    assert reconciled["coder-hermes"].key == "existing-coder-hermes-key"
     assert reconciled["coder-kdense"].key == "new-coder-kdense-key"
-    assert api.visible_models_for_key("my-farm-advisor") == (
+    assert api.visible_models_for_key("coder-hermes") == (
         "local-model.internal/unsloth-active",
         "openrouter/anthropic/claude-3.5-sonnet",
     )
@@ -489,7 +473,7 @@ def test_reconcile_virtual_keys_surfaces_key_creation_failures() -> None:
     assert "failed to create key coder-kdense" in str(error.value)
 
 
-def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_provider_keys(
+def test_reconcile_virtual_keys_creates_model_restricted_consumer_key_without_provider_keys(
 ) -> None:
     api = FakeLiteLLMAdminApi()
     manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
@@ -501,9 +485,9 @@ def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_p
     }
 
     reconciled = manager.reconcile_virtual_keys(
-        generated_keys={"surfsense": "sk-litellm-surfsense-test"},
+        generated_keys={"coder-hermes": "sk-litellm-coder-hermes-test"},
         consumer_model_allowlists={
-            "surfsense": (
+            "coder-hermes": (
                 "openrouter/hunter-alpha",
                 "openrouter/hunter-alpha",
                 "local-model.internal/unsloth-active",
@@ -513,23 +497,23 @@ def test_reconcile_virtual_keys_creates_model_restricted_surfsense_key_without_p
 
     assert api.created_teams == [
         LiteLLMTeamRecord(
-            team_id="team-surfsense",
-            team_alias="surfsense",
+            team_id="team-coder-hermes",
+            team_alias="coder-hermes",
             models=("openrouter/hunter-alpha", "local-model.internal/unsloth-active"),
-            metadata={"consumer": "surfsense", "managed_by": "dokploy-wizard"},
+            metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
         )
     ]
     assert api.created_keys == [
         LiteLLMVirtualKeyRecord(
-            key="sk-litellm-surfsense-test",
-            key_alias="surfsense",
-            team_id="team-surfsense",
+            key="sk-litellm-coder-hermes-test",
+            key_alias="coder-hermes",
+            team_id="team-coder-hermes",
             models=("openrouter/hunter-alpha", "local-model.internal/unsloth-active"),
-            metadata={"consumer": "surfsense", "managed_by": "dokploy-wizard"},
+            metadata={"consumer": "coder-hermes", "managed_by": "dokploy-wizard"},
         )
     ]
-    assert reconciled["surfsense"].key == "sk-litellm-surfsense-test"
-    serialized_contract = json.dumps(reconciled["surfsense"].__dict__, sort_keys=True)
+    assert reconciled["coder-hermes"].key == "sk-litellm-coder-hermes-test"
+    serialized_contract = json.dumps(reconciled["coder-hermes"].__dict__, sort_keys=True)
     for provider_key in upstream_provider_values.values():
         assert provider_key not in serialized_contract
 
@@ -539,17 +523,17 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="old-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="old-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
@@ -558,27 +542,74 @@ def test_reconcile_virtual_keys_recreates_managed_existing_key_when_generated_va
     manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
 
     reconciled = manager.reconcile_virtual_keys(
-        generated_keys={"my-farm-advisor": "new-my-farm-key"},
+        generated_keys={"coder-hermes": "new-coder-hermes-key"},
         consumer_model_allowlists={
-            "my-farm-advisor": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
     )
 
-    assert api.deleted_key_aliases == ["my-farm-advisor"]
+    assert api.deleted_key_aliases == ["coder-hermes"]
     assert api.updated_keys == []
-    assert reconciled["my-farm-advisor"].key == "new-my-farm-key"
-    assert api.visible_models_for_key("my-farm-advisor") == (
+    assert reconciled["coder-hermes"].key == "new-coder-hermes-key"
+    assert api.visible_models_for_key("coder-hermes") == (
         "local-model.internal/unsloth-active",
     )
     assert api.created_keys == [
         LiteLLMVirtualKeyRecord(
-            key="new-my-farm-key",
-            key_alias="my-farm-advisor",
-            team_id="team-my-farm-advisor",
+            key="new-coder-hermes-key",
+            key_alias="coder-hermes",
+            team_id="team-coder-hermes",
             models=("local-model.internal/unsloth-active",),
             metadata=_MANAGED_METADATA,
         )
     ]
+
+
+def test_reconcile_virtual_keys_reuses_key_whose_hashed_token_matches_generated_value(
+) -> None:
+    """Live /key/list returns hashed material, never the raw key.
+
+    Measured on the box: every wizard-managed alias comes back with
+    ``token == sha256(raw)`` (and no raw key field at all), so the reconciler
+    must prove the match through the hash. Before this, comparing the raw
+    state value to the payload's ``key`` (which falls back to the hash) saw
+    drift on every pass and churned delete+recreate for all four consumer
+    keys — and the preserved-phase validator could never return true.
+    """
+    generated_key = "sk-coder-hermes-wizard-key"
+    token_hash = hashlib.sha256(generated_key.encode()).hexdigest()
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
+                models=("local-model.internal/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key=token_hash,
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
+                models=("local-model.internal/unsloth-active",),
+                metadata=_MANAGED_METADATA,
+                token=token_hash,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": generated_key},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+    )
+
+    assert api.deleted_key_aliases == []
+    assert api.created_keys == []
+    assert api.updated_keys == []
 
 
 def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted_key(
@@ -586,17 +617,17 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="old-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="old-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
@@ -605,22 +636,22 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
     manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
 
     reconciled = manager.reconcile_virtual_keys(
-        generated_keys={"my-farm-advisor": "new-my-farm-key"},
+        generated_keys={"coder-hermes": "new-coder-hermes-key"},
         consumer_model_allowlists={
-            "my-farm-advisor": (
+            "coder-hermes": (
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             )
         },
     )
 
-    assert api.deleted_key_aliases == ["my-farm-advisor"]
+    assert api.deleted_key_aliases == ["coder-hermes"]
     assert api.updated_keys == []
     assert api.created_keys == [
         LiteLLMVirtualKeyRecord(
-            key="new-my-farm-key",
-            key_alias="my-farm-advisor",
-            team_id="team-my-farm-advisor",
+            key="new-coder-hermes-key",
+            key_alias="coder-hermes",
+            team_id="team-coder-hermes",
             models=(
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
@@ -628,24 +659,24 @@ def test_reconcile_virtual_keys_updates_managed_scope_drift_on_existing_accepted
             metadata=_MANAGED_METADATA,
         )
     ]
-    assert reconciled["my-farm-advisor"].key == "new-my-farm-key"
+    assert reconciled["coder-hermes"].key == "new-coder-hermes-key"
 
 
 def test_reconcile_virtual_keys_fails_closed_for_unmanaged_key_value_drift() -> None:
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="old-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="old-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
             ),
         ),
@@ -654,9 +685,9 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_key_value_drift() -> 
 
     with pytest.raises(LiteLLMAdminError, match="not wizard-managed"):
         manager.reconcile_virtual_keys(
-            generated_keys={"my-farm-advisor": "new-my-farm-key"},
+            generated_keys={"coder-hermes": "new-coder-hermes-key"},
             consumer_model_allowlists={
-                "my-farm-advisor": ("local-model.internal/unsloth-active",)
+                "coder-hermes": ("local-model.internal/unsloth-active",)
             },
         )
 
@@ -669,17 +700,17 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="existing-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="existing-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
@@ -688,9 +719,9 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
     manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
 
     reconciled = manager.reconcile_virtual_keys(
-        generated_keys={"my-farm-advisor": "existing-my-farm-key"},
+        generated_keys={"coder-hermes": "existing-coder-hermes-key"},
         consumer_model_allowlists={
-            "my-farm-advisor": (
+            "coder-hermes": (
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
             )
@@ -699,8 +730,8 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
 
     assert api.updated_teams == [
         LiteLLMTeamRecord(
-            team_id="team-my-farm-advisor",
-            team_alias="my-farm-advisor",
+            team_id="team-coder-hermes",
+            team_alias="coder-hermes",
             models=(
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
@@ -710,9 +741,9 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
     ]
     assert api.updated_keys == [
         LiteLLMVirtualKeyRecord(
-            key="existing-my-farm-key",
-            key_alias="my-farm-advisor",
-            team_id="team-my-farm-advisor",
+            key="existing-coder-hermes-key",
+            key_alias="coder-hermes",
+            team_id="team-coder-hermes",
             models=(
                 "local-model.internal/unsloth-active",
                 "openrouter/anthropic/claude-3.5-sonnet",
@@ -720,23 +751,23 @@ def test_reconcile_virtual_keys_updates_managed_team_and_key_model_drift_without
             metadata=_MANAGED_METADATA,
         )
     ]
-    assert reconciled["my-farm-advisor"].key == "existing-my-farm-key"
+    assert reconciled["coder-hermes"].key == "existing-coder-hermes-key"
 
 
 def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() -> None:
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="existing-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="existing-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
@@ -746,9 +777,9 @@ def test_reconcile_virtual_keys_fails_closed_for_unmanaged_team_model_drift() ->
 
     with pytest.raises(LiteLLMAdminError, match="not wizard-managed"):
         manager.reconcile_virtual_keys(
-            generated_keys={"my-farm-advisor": "existing-my-farm-key"},
+            generated_keys={"coder-hermes": "existing-coder-hermes-key"},
             consumer_model_allowlists={
-                "my-farm-advisor": (
+                "coder-hermes": (
                     "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 )
@@ -760,31 +791,577 @@ def test_reconcile_virtual_keys_fails_closed_for_mismatched_managed_key_metadata
     api = FakeLiteLLMAdminApi(
         teams=(
             LiteLLMTeamRecord(
-                team_id="team-my-farm-advisor",
-                team_alias="my-farm-advisor",
+                team_id="team-coder-hermes",
+                team_alias="coder-hermes",
                 models=("local-model.internal/unsloth-active",),
                 metadata=_MANAGED_METADATA,
             ),
         ),
         keys=(
             LiteLLMVirtualKeyRecord(
-                key="existing-my-farm-key",
-                key_alias="my-farm-advisor",
-                team_id="team-my-farm-advisor",
+                key="existing-coder-hermes-key",
+                key_alias="coder-hermes",
+                team_id="team-coder-hermes",
                 models=("local-model.internal/unsloth-active",),
-                metadata={"consumer": "openclaw", "managed_by": "dokploy-wizard"},
+                metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
             ),
         ),
     )
     manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
 
-    with pytest.raises(LiteLLMAdminError, match="belongs to consumer 'openclaw'"):
+    with pytest.raises(LiteLLMAdminError, match="belongs to consumer 'coder-kdense'"):
         manager.reconcile_virtual_keys(
-            generated_keys={"my-farm-advisor": "existing-my-farm-key"},
+            generated_keys={"coder-hermes": "existing-coder-hermes-key"},
             consumer_model_allowlists={
-                "my-farm-advisor": (
+                "coder-hermes": (
                     "local-model.internal/unsloth-active",
                     "openrouter/anthropic/claude-3.5-sonnet",
                 )
             },
         )
+
+
+def test_reconcile_virtual_keys_limits_workspace_issuer_to_key_management_routes() -> None:
+    api = FakeLiteLLMAdminApi()
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes", LITELLM_WORKSPACE_ISSUER_CONSUMER: "k-issuer"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+            LITELLM_WORKSPACE_ISSUER_CONSUMER: ("*",),
+        },
+    )
+
+    assert reconciled[LITELLM_WORKSPACE_ISSUER_CONSUMER].key == "k-issuer"
+    # Only the issuer gets the route fence; chat consumers keep the default
+    # (inference) surface, and the issuer itself can mint, inspect, and revoke.
+    assert api.created_key_routes[LITELLM_WORKSPACE_ISSUER_CONSUMER] == (
+        "/key/generate",
+        "/key/info",
+        "/key/delete",
+    )
+    assert api.created_key_routes["coder-hermes"] is None
+    assert reconciled[LITELLM_WORKSPACE_ISSUER_CONSUMER].models == ("*",)
+
+
+def test_reconcile_virtual_keys_keeps_issuer_routes_on_scope_drift() -> None:
+    issuer_metadata = {
+        "consumer": LITELLM_WORKSPACE_ISSUER_CONSUMER,
+        "managed_by": "dokploy-wizard",
+    }
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-" + LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                team_alias=LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                models=("local-model.internal/unsloth-active",),
+                metadata=issuer_metadata,
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-litellm-coder-workspace-issuer-existing",
+                key_alias=LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                team_id="team-" + LITELLM_WORKSPACE_ISSUER_CONSUMER,
+                models=("local-model.internal/unsloth-active",),
+                metadata=issuer_metadata,
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={
+            LITELLM_WORKSPACE_ISSUER_CONSUMER: "sk-litellm-coder-workspace-issuer-existing"
+        },
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("*",)},
+    )
+
+    assert api.updated_key_routes[LITELLM_WORKSPACE_ISSUER_CONSUMER] == (
+        "/key/generate",
+        "/key/info",
+        "/key/delete",
+    )
+
+
+def test_reconcile_virtual_keys_prunes_retired_managed_consumers() -> None:
+    api = FakeLiteLLMAdminApi(
+        teams=(
+            LiteLLMTeamRecord(
+                team_id="team-coder-kdense",
+                team_alias="coder-kdense",
+                models=("local-model.internal/unsloth-active",),
+                metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
+            ),
+            LiteLLMTeamRecord(
+                team_id="team-operator-team",
+                team_alias="operator-team",
+                models=("*",),
+                metadata={"owned_by": "operator"},
+            ),
+        ),
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-retired-kdense",
+                key_alias="coder-kdense",
+                team_id="team-coder-kdense",
+                models=("local-model.internal/unsloth-active",),
+                metadata={"consumer": "coder-kdense", "managed_by": "dokploy-wizard"},
+            ),
+            LiteLLMVirtualKeyRecord(
+                key="sk-operator-key",
+                key_alias="operator-key",
+                team_id=None,
+                models=("*",),
+                metadata={},
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    reconciled = manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+        },
+    )
+
+    assert set(reconciled) == {"coder-hermes"}
+    # The retired wizard-managed consumer is swept end to end...
+    assert api.deleted_key_aliases == ["coder-kdense"]
+    assert api.deleted_team_ids == ["team-coder-kdense"]
+    # ...while records without the wizard marker belong to the operator and stay.
+    assert api.list_keys() and any(record.key_alias == "operator-key" for record in api.list_keys())
+    assert any(team.team_alias == "operator-team" for team in api.list_teams())
+
+
+def test_reconcile_virtual_keys_spare_workspace_minted_keys() -> None:
+    """Workspace-minted keys are wizard-marked but not state consumers.
+
+    The template MINTPY lane mints ``<login>-<workspace>`` aliases carrying
+    ``coder_workspace`` metadata; the alias never appears in the wizard's
+    generated-keys document. Before the exemption, the retired-consumer sweep
+    deleted every live workspace key on every real shared_core pass (measured
+    on the box: /key/list held exactly the four state aliases after a pass,
+    the workspace key gone). MINTPY re-mints at next boot, so the box only
+    showed silent per-pass churn — the exemption must keep the key.
+    """
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            LiteLLMVirtualKeyRecord(
+                key="sk-clayton-dev",
+                key_alias="clayton-dev",
+                team_id=None,
+                models=("sync/*", "sync/default-chat"),
+                metadata={
+                    "managed_by": "dokploy-wizard",
+                    "coder_workspace": "dev",
+                    "coder_owner": "clayton",
+                },
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",),
+        },
+    )
+
+    assert api.deleted_key_aliases == []
+    assert any(record.key_alias == "clayton-dev" for record in api.list_keys())
+
+
+def _minted_workspace_key(
+    *,
+    alias: str,
+    owner: str | None,
+    workspace: str,
+    models: tuple[str, ...],
+    key: str,
+    user_id: str | None = None,
+) -> LiteLLMVirtualKeyRecord:
+    metadata: dict[str, object] = {
+        "managed_by": "dokploy-wizard",
+        "coder_workspace": workspace,
+    }
+    if owner is not None:
+        metadata["coder_owner"] = owner
+    return LiteLLMVirtualKeyRecord(
+        key=key,
+        key_alias=alias,
+        team_id=None,
+        models=models,
+        metadata=metadata,
+        user_id=user_id,
+    )
+
+
+def test_workspace_key_policy_sweep_degrades_out_of_policy_mint_without_reboot() -> None:
+    """A policy flip re-scopes live workspace keys admin-side, no boot needed.
+
+    The minted token is deterministic (sha256 of issuer + ``<login>-<workspace>``),
+    so the master-key sweep can address the raw token and /key/update the grant
+    on any shared_core pass. The key is spared by the retired sweep (it stays)
+    and updated in place; the same update carries the identity migration (the
+    coder- alias and the owner's user_id). A second pass proves convergence.
+    """
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="guest-dev",
+                owner="guest",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-stored-mint-material",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+    policy = build_litellm_workspace_key_policy(
+        allow_new_users=False, allowed_users=(), admin_email="Clayton@Example.com"
+    )
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+
+    assert api.deleted_key_aliases == []
+    assert len(api.updated_keys) == 1
+    updated = api.updated_keys[0]
+    # Alias and attribution migrate with the re-scope; the token seed stays
+    # the bare label, so the deterministic address below is unchanged.
+    assert updated.key_alias == "coder-guest-dev"
+    assert updated.user_id == "guest"
+    assert updated.models == (WORKSPACE_KEY_DENY_MODEL,)
+    assert updated.key == (
+        "sk-" + hashlib.sha256((issuer + ":guest-dev").encode()).hexdigest()[:40]
+    )
+
+    # Idempotent: the degraded record now matches the deny policy, so the
+    # next shared_core pass changes nothing.
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+    assert len(api.updated_keys) == 1
+
+
+def test_workspace_key_policy_sweep_upgrades_allowlisted_owner() -> None:
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="bob-dev",
+                owner="bob",
+                workspace="dev",
+                models=(WORKSPACE_KEY_DENY_MODEL,),
+                key="sk-bob-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False,
+            # Allowlist logins normalize to lowercase: Coder logins are
+            # lowercase by derivation, and this comparison must match.
+            allowed_users=("Bob",),
+            admin_email="admin@example.com",
+        ),
+    )
+
+    assert api.deleted_key_aliases == []
+    assert [record.models for record in api.updated_keys] == [WORKSPACE_KEY_GRANTED_MODELS]
+
+
+def test_workspace_key_policy_sweep_spares_exempt_unattributed_and_foreign_keys() -> None:
+    """Admin exemption, anonymous spares, and operator-owned keys all stay put."""
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="coder-clayton-dev",
+                owner="clayton",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-admin-mint",
+                user_id="clayton",
+            ),
+            _minted_workspace_key(
+                alias="orphan-dev",
+                owner=None,
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-orphan-mint",
+            ),
+            LiteLLMVirtualKeyRecord(
+                key="sk-operator",
+                key_alias="operator-mint",
+                team_id=None,
+                models=("*",),
+                metadata={},
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False, allowed_users=(), admin_email="clayton@example.com"
+        ),
+    )
+
+    # The seeded admin is always exempt (granted, no update needed); the
+    # owner-less mint is spared rather than guessed at; the unmarked operator
+    # key is invisible to the sweep and to the retired sweep.
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []
+    assert api.deleted_team_ids == []
+
+
+def test_workspace_key_policy_sweep_migrates_alias_and_owner_without_model_drift() -> None:
+    """Identity fields migrate on their own — a correctly-scoped key is not done.
+
+    A key minted before person attribution carries the bare ``<login>-<ws>``
+    alias and no user_id even though its models already match the policy. The
+    same in-place /key/update that would fix a scope flip renames it and
+    attaches the owner, so an already-running workspace converges to the
+    one-ID shape with no reboot.
+    """
+    issuer = "sk-litellm-coder-workspace-issuer-generated"
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="bob-dev",
+                owner="bob",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-bob-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+    policy = build_litellm_workspace_key_policy(
+        allow_new_users=True, allowed_users=(), admin_email="admin@example.com"
+    )
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+
+    assert len(api.updated_keys) == 1
+    updated = api.updated_keys[0]
+    assert updated.key_alias == "coder-bob-dev"
+    assert updated.user_id == "bob"
+    assert updated.models == WORKSPACE_KEY_GRANTED_MODELS
+
+    manager.reconcile_virtual_keys(
+        generated_keys={LITELLM_WORKSPACE_ISSUER_CONSUMER: issuer},
+        consumer_model_allowlists={LITELLM_WORKSPACE_ISSUER_CONSUMER: ("sync/*",)},
+        workspace_key_policy=policy,
+    )
+    assert len(api.updated_keys) == 1
+
+
+class GroupRecordingLiteLLMApi(FakeLiteLLMAdminApi):
+    """Fake with a model registry and a mutable access-group table."""
+
+    def __init__(
+        self,
+        *,
+        served: tuple[str, ...],
+        groups: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__()
+        self._served = served
+        self._groups = dict(groups or {})
+        self.created_groups: list[tuple[str, tuple[str, ...]]] = []
+        self.updated_groups: list[tuple[str, tuple[str, ...]]] = []
+
+    def list_model_names(self) -> tuple[str, ...]:
+        return self._served
+
+    def list_access_groups(self) -> tuple[str, ...]:
+        return tuple(sorted(self._groups))
+
+    def access_group_model_names(self, *, name: str) -> tuple[str, ...] | None:
+        return self._groups.get(name)
+
+    def create_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._groups[name] = tuple(model_names)
+        self.created_groups.append((name, model_names))
+
+    def update_access_group(self, *, name: str, model_names: tuple[str, ...]) -> None:
+        self._groups[name] = tuple(model_names)
+        self.updated_groups.append((name, model_names))
+
+
+def _group_manager(api: GroupRecordingLiteLLMApi) -> LiteLLMGatewayManager:
+    return LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+
+def test_workspace_access_group_created_with_registered_sync_names_only() -> None:
+    """Cold gateway: the group stands up with the sync set, never a wildcard.
+
+    Measured on the deployed build: /access_group/new resolves every literal
+    against the registry (wildcards included are rejected), so the wizard
+    seeds the group from /model/info's real sync/* names.
+    """
+    api = GroupRecordingLiteLLMApi(
+        served=("gpt-tokenizer", "sync/default-chat", "sync/nvidia-gemma", "sync/x")
+    )
+
+    expected = _group_manager(api).ensure_workspace_access_group()
+
+    assert expected == ("sync/default-chat", "sync/nvidia-gemma", "sync/x")
+    assert api.created_groups == [(WORKSPACE_KEY_ACCESS_GROUP, expected)]
+    assert api.updated_groups == []
+
+
+def test_workspace_access_group_regrants_added_models_and_converges_quietly() -> None:
+    api = GroupRecordingLiteLLMApi(
+        served=("sync/default-chat", "sync/new-model"),
+        groups={WORKSPACE_KEY_ACCESS_GROUP: ("sync/default-chat",)},
+    )
+    manager = _group_manager(api)
+
+    expected = manager.ensure_workspace_access_group()
+    assert api.updated_groups == [(WORKSPACE_KEY_ACCESS_GROUP, expected)]
+
+    # Autosync added nothing new on the next pass: no PUT at all.
+    api.updated_groups.clear()
+    api.created_groups.clear()
+    manager.ensure_workspace_access_group()
+    assert api.updated_groups == []
+    assert api.created_groups == []
+
+
+def test_workspace_access_group_inert_until_models_register() -> None:
+    """No sync models registered (cold sidecar) means no empty group."""
+    api = GroupRecordingLiteLLMApi(served=("gpt-tokenizer",))
+
+    assert _group_manager(api).ensure_workspace_access_group() == ()
+    assert api.created_groups == []
+    assert api.updated_groups == []
+
+
+class UserRecordingLiteLLMApi(FakeLiteLLMAdminApi):
+    def __init__(self, *, users: tuple[LiteLLMUserRecord, ...] = ()) -> None:
+        super().__init__()
+        self._users = {user.user_id: user for user in users}
+        self.upserted_users: list[LiteLLMUserRecord] = []
+        self.upserted_passwords: dict[str, str] = {}
+
+    def list_users(self) -> tuple[LiteLLMUserRecord, ...]:
+        return tuple(self._users.values())
+
+    def upsert_user(
+        self, *, user_id: str, user_email: str, user_role: str, password: str
+    ) -> None:
+        record = LiteLLMUserRecord(
+            user_id=user_id, user_email=user_email, user_role=user_role
+        )
+        self._users[user_id] = record
+        self.upserted_users.append(record)
+        self.upserted_passwords[user_id] = password
+
+
+def _assignment(
+    user_id: str, email: str, role: str, password: str = "StackPw123"
+) -> LiteLLMUserAssignment:
+    return LiteLLMUserAssignment(
+        user_id=user_id, user_email=email, user_role=role, password=password
+    )
+
+
+def test_ensure_user_identities_creates_missing_rows_with_password() -> None:
+    api = UserRecordingLiteLLMApi()
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    notes = manager.ensure_user_identities(
+        (
+            _assignment("bob", "bob@example.com", "internal_user"),
+            _assignment("clayton", "clayton@example.com", "proxy_admin"),
+        )
+    )
+
+    assert sorted(notes) == [
+        "Created LiteLLM user 'bob' (internal_user).",
+        "Created LiteLLM user 'clayton' (proxy_admin).",
+    ]
+    assert {record.user_id for record in api.upserted_users} == {"bob", "clayton"}
+    assert set(api.upserted_passwords.values()) == {"StackPw123"}
+
+
+def test_ensure_user_identities_converges_drift_and_spares_quiet_rows() -> None:
+    """Email/role drift re-upserts; a converged row is not touched at all.
+
+    The row's password is not comparable from the list payload, so the lane
+    only re-syncs it when identity fields move or the row is new — a person
+    who rotated their gateway password in the UI keeps it on quiet passes.
+    """
+    api = UserRecordingLiteLLMApi(
+        users=(
+            LiteLLMUserRecord("old", "stale@old.test", "internal_user"),
+            LiteLLMUserRecord("fine", "fine@example.com", "internal_user"),
+            LiteLLMUserRecord("switch", "switch@example.com", "internal_user"),
+        )
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    notes = manager.ensure_user_identities(
+        (
+            _assignment("old", "old@example.com", "internal_user"),
+            _assignment("fine", "fine@example.com", "internal_user"),
+            _assignment("switch", "switch@example.com", "proxy_admin"),
+        )
+    )
+
+    assert notes == [
+        "Updated LiteLLM user 'old' (internal_user).",
+        "Updated LiteLLM user 'switch' (proxy_admin).",
+    ]
+    assert [record.user_id for record in api.upserted_users] == ["old", "switch"]
+    assert api.upserted_passwords.get("fine") is None
+
+
+def test_workspace_key_policy_sweep_is_inert_without_issuer_material() -> None:
+    """No issuer raw in state means the deterministic token cannot be re-derived."""
+    api = FakeLiteLLMAdminApi(
+        keys=(
+            _minted_workspace_key(
+                alias="guest-dev",
+                owner="guest",
+                workspace="dev",
+                models=WORKSPACE_KEY_GRANTED_MODELS,
+                key="sk-guest-mint",
+            ),
+        ),
+    )
+    manager = LiteLLMGatewayManager(api=api, sleep_fn=lambda _: None)
+
+    manager.reconcile_virtual_keys(
+        generated_keys={"coder-hermes": "k-hermes"},
+        consumer_model_allowlists={"coder-hermes": ("sync/*",)},
+        workspace_key_policy=build_litellm_workspace_key_policy(
+            allow_new_users=False, allowed_users=(), admin_email="admin@example.com"
+        ),
+    )
+
+    assert api.updated_keys == []
+    assert api.deleted_key_aliases == []

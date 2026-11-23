@@ -42,54 +42,14 @@ class PackEnvMetadataError(ValueError):
 
 _SENSITIVE_ENV_KEYS = frozenset(
     {
-        "ADVISOR_GATEWAY_PASSWORD",
         "AI_DEFAULT_API_KEY",
-        "ANTHROPIC_API_KEY",
         "LITELLM_OPENCODE_GO_API_KEY",
         "LITELLM_OPENROUTER_API_KEY",
         "LITELLM_NVIDIA_API_KEY",
-        "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-        "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-        "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-        "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-        "OPENCLAW_GATEWAY_PASSWORD",
-        "OPENCLAW_GATEWAY_TOKEN",
-        "OPENCLAW_NEXA_AGENT_PASSWORD",
-        "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
-        "OPENCLAW_NEXA_MEM0_API_KEY",
-        "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
-        "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
-        "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
-        "OPENCLAW_NEXA_TALK_SHARED_SECRET",
-        "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
-        "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
-        "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
-        "OPENCLAW_NVIDIA_API_KEY",
-        "OPENCLAW_OPENROUTER_API_KEY",
-        "OPENCLAW_TELEGRAM_BOT_TOKEN",
         "OPENCODE_GO_API_KEY",
-        "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY",
-    "SURFSENSE_DB_PASSWORD",
-    "SURFSENSE_LITELLM_VIRTUAL_KEY",
-    "SURFSENSE_SECRET_KEY",
-    "SURFSENSE_SEARXNG_SECRET",
-        "SURFSENSE_ZERO_ADMIN_PASSWORD",
-        "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-        "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-        "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-        "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
     }
 )
 _REQUIRED_ENV_KEYS: frozenset[str] = frozenset()
-_OPENCLAW_AGENT_USER_ENV_KEYS = frozenset(
-    {
-        "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
-        "OPENCLAW_NEXA_AGENT_EMAIL",
-        "OPENCLAW_NEXA_AGENT_PASSWORD",
-        "OPENCLAW_NEXA_AGENT_USER_ID",
-    }
-)
 _SHARED_AI_ENV_KEYS = frozenset(
     {
         "AI_DEFAULT_API_KEY",
@@ -111,9 +71,7 @@ _SHARED_LITELLM_ENV_KEYS = frozenset(
     }
 )
 _SHARED_MAIL_ENV_KEYS = frozenset({"OUTBOUND_SMTP_FROM_ADDRESS", "OUTBOUND_SMTP_HOSTNAME"})
-_FARM_LITELLM_SHARED_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "NVIDIA_BASE_URL"})
 
-_NEXTCLOUD_KEYS = ("NEXTCLOUD_OPENCLAW_RESCAN_CRON", "NEXTCLOUD_OPENCLAW_RESCAN_TIMEZONE")
 _MAIL_KEYS = ("OUTBOUND_SMTP_HOSTNAME", "OUTBOUND_SMTP_FROM_ADDRESS")
 _CODER_KEYS = (
     "HERMES_INFERENCE_PROVIDER",
@@ -133,112 +91,6 @@ _CODER_KEYS = (
     "NVIDIA_BASE_URL",
     "OPENCODE_GO_API_KEY",
     "OPENCODE_GO_BASE_URL",
-)
-_OPENCLAW_KEYS = (
-    "ADVISOR_GATEWAY_PASSWORD",
-    "OPENCLAW_GATEWAY_PASSWORD",
-    "OPENCLAW_CHANNELS",
-    "OPENCLAW_GATEWAY_TOKEN",
-    "OPENCLAW_NEXA_DEPLOYMENT_MODE",
-    "OPENCLAW_NEXA_NEXTCLOUD_BASE_URL",
-    "OPENCLAW_NEXA_TALK_SHARED_SECRET",
-    "OPENCLAW_NEXA_TALK_SIGNING_SECRET",
-    "OPENCLAW_NEXA_ONLYOFFICE_CALLBACK_SECRET",
-    "OPENCLAW_NEXA_EDITOR_EVENTS_SHARED_SECRET",
-    "OPENCLAW_NEXA_WEBDAV_AUTH_USER",
-    "OPENCLAW_NEXA_WEBDAV_AUTH_PASSWORD",
-    "OPENCLAW_NEXA_AGENT_USER_ID",
-    "OPENCLAW_NEXA_AGENT_DISPLAY_NAME",
-    "OPENCLAW_NEXA_AGENT_PASSWORD",
-    "OPENCLAW_NEXA_AGENT_EMAIL",
-    "OPENCLAW_NEXA_MEM0_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_API_KEY",
-    "OPENCLAW_NEXA_MEM0_LLM_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_LLM_API_KEY",
-    "OPENCLAW_NEXA_MEM0_EMBEDDER_MODEL",
-    "OPENCLAW_NEXA_MEM0_EMBEDDER_DIMENSIONS",
-    "OPENCLAW_NEXA_MEM0_VECTOR_BACKEND",
-    "OPENCLAW_NEXA_MEM0_VECTOR_BASE_URL",
-    "OPENCLAW_NEXA_MEM0_VECTOR_API_KEY",
-    "OPENCLAW_NEXA_MEM0_VECTOR_DIMENSIONS",
-    "OPENCLAW_NEXA_PRESENCE_POLICY",
-    "AI_DEFAULT_API_KEY",
-    "AI_DEFAULT_BASE_URL",
-    "AI_DEFAULT_PROVIDER",
-    "AI_DEFAULT_MODEL",
-    "LITELLM_OPENCODE_GO_API_KEY",
-    "LITELLM_OPENROUTER_API_KEY",
-    "LITELLM_OPENROUTER_MODELS",
-    "LITELLM_NVIDIA_API_KEY",
-    "LITELLM_NVIDIA_BASE_URL",
-    "LITELLM_NVIDIA_MODELS",
-    "NVIDIA_BASE_URL",
-    "OPENCLAW_OPENROUTER_API_KEY",
-    "OPENCLAW_NVIDIA_API_KEY",
-    "OPENCLAW_PRIMARY_MODEL",
-    "OPENCLAW_FALLBACK_MODELS",
-    "OPENCLAW_TELEGRAM_BOT_TOKEN",
-    "OPENCLAW_TELEGRAM_OWNER_USER_ID",
-)
-_FARM_KEYS = (
-    "ADVISOR_GATEWAY_PASSWORD",
-    "MY_FARM_ADVISOR_GATEWAY_PASSWORD",
-    "MY_FARM_ADVISOR_CHANNELS",
-    "AI_DEFAULT_API_KEY",
-    "AI_DEFAULT_BASE_URL",
-    "AI_DEFAULT_PROVIDER",
-    "AI_DEFAULT_MODEL",
-    "ANTHROPIC_API_KEY",
-    "LITELLM_OPENCODE_GO_API_KEY",
-    "LITELLM_OPENROUTER_API_KEY",
-    "LITELLM_OPENROUTER_MODELS",
-    "LITELLM_NVIDIA_API_KEY",
-    "LITELLM_NVIDIA_BASE_URL",
-    "LITELLM_NVIDIA_MODELS",
-    "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-    "MY_FARM_ADVISOR_NVIDIA_API_KEY",
-    "NVIDIA_BASE_URL",
-    "MY_FARM_ADVISOR_PRIMARY_MODEL",
-    "MY_FARM_ADVISOR_FALLBACK_MODELS",
-    "MY_FARM_ADVISOR_TELEGRAM_BOT_TOKEN",
-    "MY_FARM_ADVISOR_TELEGRAM_OWNER_USER_ID",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_TOKEN",
-    "TELEGRAM_FIELD_OPERATIONS_BOT_PAIRING_CODE",
-    "TELEGRAM_FIELD_OPERATIONS_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_TOKEN",
-    "TELEGRAM_DATA_PIPELINE_BOT_PAIRING_CODE",
-    "TELEGRAM_DATA_PIPELINE_ALLOWED_USERS",
-    "TELEGRAM_DATA_PIPELINE_BOT_ALLOWED_USERS",
-    "TELEGRAM_ALLOWED_USERS",
-    "OPENCLAW_TELEGRAM_GROUP_POLICY",
-    "TZ",
-    "OPENCLAW_SYNC_SKILLS_ON_START",
-    "OPENCLAW_SYNC_SKILLS_OVERWRITE",
-    "OPENCLAW_FORCE_SKILL_SYNC",
-    "OPENCLAW_BOOTSTRAP_REFRESH",
-    "OPENCLAW_MEMORY_SEARCH_ENABLED",
-    "R2_BUCKET_NAME",
-    "R2_ENDPOINT",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "CF_ACCOUNT_ID",
-    "DATA_MODE",
-    "WORKSPACE_DATA_R2_RCLONE_MOUNT",
-    "WORKSPACE_DATA_R2_PREFIX",
-)
-_SURFSENSE_KEYS = (
-    "SURFSENSE_SUBDOMAIN",
-    "SURFSENSE_API_SUBDOMAIN",
-    "SURFSENSE_ZERO_SUBDOMAIN",
-    "SURFSENSE_VERSION",
-    "SURFSENSE_FRONTEND_PUBLIC_URL",
-    "SURFSENSE_API_PUBLIC_URL",
-    "SURFSENSE_ZERO_PUBLIC_URL",
-    "SURFSENSE_AUTH_TYPE",
-    "SURFSENSE_ETL_SERVICE",
-    "SURFSENSE_EMBEDDING_MODEL",
-    "SURFSENSE_PRIMARY_MODEL",
-    "SURFSENSE_FALLBACK_MODELS",
 )
 
 
@@ -341,8 +193,6 @@ def _metadata_for_enabled_packs(enabled_packs: tuple[str, ...]) -> tuple[PackEnv
 
 
 def _default_value_for_key(key: str) -> str | None:
-    if key == "TZ":
-        return "UTC"
     return None
 
 
@@ -414,12 +264,8 @@ def _pack_entry(
 def _target_suffixes_for_key(
     key: str, *, default_suffixes: tuple[str, ...]
 ) -> tuple[str, ...]:
-    if key in _FARM_LITELLM_SHARED_ENV_KEYS:
-        return tuple(dict.fromkeys((*default_suffixes, "shared-litellm")))
     if key in _SHARED_LITELLM_ENV_KEYS:
         return ("shared-litellm",)
-    if key in _OPENCLAW_AGENT_USER_ENV_KEYS:
-        return tuple(dict.fromkeys((*default_suffixes, "nextcloud")))
     return default_suffixes
 
 
@@ -430,8 +276,6 @@ def _owner_for_key(key: str, *, default_owner: str, shared: bool) -> str:
         return "shared-litellm"
     if key in _SHARED_MAIL_ENV_KEYS:
         return "shared-mail-relay"
-    if key in _FARM_LITELLM_SHARED_ENV_KEYS:
-        return "shared-litellm"
     if shared:
         return f"shared-{default_owner}"
     return default_owner
@@ -440,7 +284,7 @@ def _owner_for_key(key: str, *, default_owner: str, shared: bool) -> str:
 def _source_for_key(key: str, *, default_source: str) -> str:
     if key in _SHARED_AI_ENV_KEYS:
         return f"operator-input:{key}:shared-ai-defaults"
-    if key in _SHARED_LITELLM_ENV_KEYS or key in _FARM_LITELLM_SHARED_ENV_KEYS:
+    if key in _SHARED_LITELLM_ENV_KEYS:
         return f"operator-input:{key}:shared-litellm"
     return f"{default_source}:{key}"
 
@@ -459,12 +303,6 @@ def _required_placeholder(name: str) -> str:
 
 _PACK_ENV_METADATA: tuple[PackEnvMetadata, ...] = (
     *_pack_entries(
-        "nextcloud",
-        _NEXTCLOUD_KEYS,
-        owner="nextcloud",
-        target_service_suffixes=("nextcloud",),
-    ),
-    *_pack_entries(
         "moodle",
         _MAIL_KEYS,
         owner="shared-mail-relay",
@@ -481,31 +319,11 @@ _PACK_ENV_METADATA: tuple[PackEnvMetadata, ...] = (
         source="operator-input:mail-relay",
     ),
     *_pack_entries(
-        "surfsense",
-        _SURFSENSE_KEYS,
-        owner="surfsense",
-        target_service_suffixes=("surfsense-web", "surfsense-backend", "surfsense-zero"),
-    ),
-    *_pack_entries(
         "coder",
         _CODER_KEYS,
         owner="coder",
         target_service_suffixes=("coder",),
         shared_keys=_SHARED_AI_ENV_KEYS,
-    ),
-    *_pack_entries(
-        "openclaw",
-        _OPENCLAW_KEYS,
-        owner="openclaw",
-        target_service_suffixes=("openclaw",),
-        shared_keys=_SHARED_AI_ENV_KEYS,
-    ),
-    *_pack_entries(
-        "my-farm-advisor",
-        _FARM_KEYS,
-        owner="my-farm-advisor",
-        target_service_suffixes=("my-farm-advisor",),
-        shared_keys=_SHARED_AI_ENV_KEYS | _FARM_LITELLM_SHARED_ENV_KEYS,
     ),
 )
 

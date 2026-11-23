@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,14 @@ from dokploy_wizard.networking import (
     reconcile_cloudflare_access,
     reconcile_networking,
 )
-from dokploy_wizard.state import DesiredState, OwnershipLedger, RawEnvInput
+from dokploy_wizard.networking.edge_https import EDGE_HTTPS_FILENAME
+from dokploy_wizard.state import (
+    DesiredState,
+    OwnedResource,
+    OwnershipLedger,
+    RawEnvInput,
+    resolve_desired_state,
+)
 
 
 @dataclass
@@ -26,6 +34,8 @@ class FakeCloudflareBackend:
     access_apps: dict[str, CloudflareAccessApplication] = field(default_factory=dict)
     access_policies: dict[str, CloudflareAccessPolicy] = field(default_factory=dict)
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
+    dns_records: dict[str, CloudflareDnsRecord] = field(default_factory=dict)
+    dns_deletions: list[tuple[str, str]] = field(default_factory=list)
     update_tunnel_configuration_calls: list[tuple[str, str, tuple[dict[str, object], ...]]] = field(
         default_factory=list
     )
@@ -81,8 +91,13 @@ class FakeCloudflareBackend:
         record_type: str | None,
         content: str | None,
     ) -> tuple[CloudflareDnsRecord, ...]:
-        del zone_id, hostname, record_type, content
-        return ()
+        del zone_id, record_type
+        record = self.dns_records.get(hostname.lower())
+        if record is None:
+            return ()
+        if content is not None and record.content != content:
+            return ()
+        return (record,)
 
     def create_dns_record(
         self,
@@ -118,6 +133,12 @@ class FakeCloudflareBackend:
             content=content,
             proxied=proxied,
         )
+
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None:
+        self.dns_deletions.append((zone_id, record_id))
+        for hostname, record in list(self.dns_records.items()):
+            if record.record_id == record_id:
+                del self.dns_records[hostname]
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         del zone_id
@@ -218,8 +239,20 @@ class FakeCloudflareBackend:
         self.access_policies[app_id] = policy
         return policy
 
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        for domain, app in list(self.access_apps.items()):
+            if app.app_id == app_id:
+                del self.access_apps[domain]
+                self.access_policies.pop(app_id, None)
 
-def test_litellm_admin_access_planned_without_advisor_packs() -> None:
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        del account_id, policy_id
+        self.access_policies.pop(app_id, None)
+
+
+
+def test_litellm_admin_access_planned_without_optional_packs() -> None:
     backend = FakeCloudflareBackend(
         existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel")
     )
@@ -349,10 +382,287 @@ def _desired_state(*, cloudflare_access_otp_emails: tuple[str, ...] = ("owner@ex
         hostnames={"dokploy": "dokploy.example.com"},
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
-        openclaw_gateway_token=None,
-        openclaw_channels=(),
-        openclaw_replicas=None,
-        my_farm_advisor_channels=(),
-        my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan(stack_name="wizard-stack", enabled_packs=()),
     )
+
+
+def test_networking_prunes_owned_dns_record_for_de_exposed_hostname() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "s3.example.com": CloudflareDnsRecord(
+                record_id="dns-s3",
+                name="s3.example.com",
+                record_type="CNAME",
+                content="tunnel-123.cfargotunnel.com",
+                proxied=True,
+            ),
+            "filex.example.com": CloudflareDnsRecord(
+                record_id="dns-filex",
+                name="filex.example.com",
+                record_type="CNAME",
+                content="tunnel-123.cfargotunnel.com",
+                proxied=True,
+            ),
+        },
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs,filex",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-s3",
+                scope="zone:zone-1:s3.example.com",
+            ),
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-filex",
+                scope="zone:zone-1:filex.example.com",
+            ),
+        ),
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=backend,
+    )
+
+    assert backend.dns_deletions == [("zone-1", "dns-s3")]
+    assert any("Deleted stale DNS record for 's3.example.com'" in note for note in phase.result.notes)
+    # filex.example.com is desired; the record for it stays (and gets re-planned
+    # through the create/update path, never pruned).
+    assert all(hostname != "filex.example.com" for hostname, _ in backend.dns_deletions)
+
+
+def test_networking_keeps_repointed_stale_dns_record() -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+        dns_records={
+            "s3.example.com": CloudflareDnsRecord(
+                record_id="dns-s3",
+                name="s3.example.com",
+                record_type="CNAME",
+                content="origin.example.net",
+                proxied=False,
+            )
+        },
+    )
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    desired_state = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "wizard-stack",
+                "ROOT_DOMAIN": "example.com",
+                "PACKS": "seaweedfs",
+            },
+        )
+    )
+    ledger = OwnershipLedger(
+        format_version=1,
+        resources=(
+            OwnedResource(
+                resource_type="cloudflare_dns_record",
+                resource_id="dns-s3",
+                scope="zone:zone-1:s3.example.com",
+            ),
+        ),
+    )
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=ledger,
+        backend=backend,
+    )
+    # The zone query filters by tunnel content, so a record the operator
+    # repointed is invisible to the prune: it is neither deleted nor claimed,
+    # and its ledger entry is simply dropped.
+    assert backend.dns_deletions == []
+    assert backend.dns_records["s3.example.com"].content == "origin.example.net"
+    assert any(
+        "left the zone; dropped its ledger entry" in note for note in phase.result.notes
+    )
+
+
+def _edge_inputs(*, packs: str | None = None) -> tuple[RawEnvInput, DesiredState]:
+    raw_env = RawEnvInput(
+        format_version=1,
+        values={
+            "CLOUDFLARE_API_TOKEN": "token",
+            "CLOUDFLARE_ACCOUNT_ID": "account-1",
+            "CLOUDFLARE_ZONE_ID": "zone-1",
+        },
+    )
+    values = {"STACK_NAME": "s", "ROOT_DOMAIN": "example.com"}
+    if packs is not None:
+        values["PACKS"] = packs
+    desired_state = resolve_desired_state(RawEnvInput(format_version=1, values=values))
+    return raw_env, desired_state
+
+
+def _traefik_home(tmp_path: Path) -> Path:
+    (tmp_path / "traefik.yml").write_text(
+        "entryPoints:\n"
+        "  web:\n"
+        "    address: :80\n"
+        "  websecure:\n"
+        "    address: :443\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "dynamic").mkdir()
+    return tmp_path
+
+
+def test_networking_writes_traefik_edge_https(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+    home = _traefik_home(tmp_path)
+    restarts: list[str] = []
+
+    def restart(service: str) -> bool:
+        restarts.append(service)
+        return True
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=home,
+        restart_traefik=restart,
+    )
+
+    content = (home / "dynamic" / EDGE_HTTPS_FILENAME).read_text(encoding="utf-8")
+    # Every wizard login surface is redirected; the zone is never modified.
+    assert "wizard-edge-https-dokploy-example-com:" in content
+    assert "wizard-edge-https-filex-example-com:" in content
+    assert "wizard-edge-https-coder-example-com:" in content
+    # Coder workspace wildcard hosts must keep the option of plain HTTP.
+    assert "*.example.com" not in content
+    # Traefik v3: Header (v2's HeadersRegexp was removed and fails open).
+    assert "Header(`X-Forwarded-Proto`, `http`)" in content
+    assert "redirectScheme:" in content
+    assert (home / "traefik.yml").read_text(encoding="utf-8").count("forwardedHeaders:") == 1
+    assert restarts == ["dokploy-traefik"]
+    assert not hasattr(backend, "always_use_https_calls")
+    assert any("HTTPS-edge redirect drop-in" in note for note in phase.result.notes)
+
+
+def test_networking_edge_https_second_pass_is_noop(tmp_path: Path) -> None:
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    home = _traefik_home(tmp_path)
+
+    reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=home,
+        restart_traefik=lambda _svc: True,
+    )
+    static_first = (home / "traefik.yml").read_bytes()
+    dropin_first = (home / "dynamic" / EDGE_HTTPS_FILENAME).read_bytes()
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=home,
+        # No change on the second pass, so Traefik must not be restarted again.
+        restart_traefik=lambda _svc: False,
+    )
+
+    assert (home / "traefik.yml").read_bytes() == static_first
+    assert (home / "dynamic" / EDGE_HTTPS_FILENAME).read_bytes() == dropin_first
+    assert any("already trusts forwarded headers" in note for note in phase.result.notes)
+    assert any("is up to date" in note for note in phase.result.notes)
+
+
+def test_networking_dry_run_only_plans_the_https_edge(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+    home = _traefik_home(tmp_path)
+
+    phase = reconcile_networking(
+        dry_run=True,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=home,
+        restart_traefik=lambda _svc: True,
+    )
+
+    assert not (home / "dynamic" / EDGE_HTTPS_FILENAME).exists()
+    assert "forwardedHeaders" not in (home / "traefik.yml").read_text(encoding="utf-8")
+    assert any(
+        "Would add forwardedHeaders.trustedIPs" in note for note in phase.result.notes
+    )
+    assert any(
+        "Would write the Traefik HTTPS-edge redirect drop-in" in note
+        for note in phase.result.notes
+    )
+
+
+def test_networking_warns_when_traefik_not_installed(tmp_path: Path) -> None:
+    backend = FakeCloudflareBackend(
+        existing_tunnel=CloudflareTunnel(tunnel_id="tunnel-123", name="wizard-stack-tunnel"),
+    )
+    raw_env, desired_state = _edge_inputs(packs="coder,filex")
+
+    phase = reconcile_networking(
+        dry_run=False,
+        raw_env=raw_env,
+        desired_state=desired_state,
+        ownership_ledger=OwnershipLedger(format_version=1, resources=()),
+        backend=backend,
+        traefik_dir=tmp_path / "not-installed",
+        restart_traefik=lambda _svc: True,
+    )
+
+    # The redirect is hardening, not core: a missing Traefik warns once, never fails.
+    assert phase.result.outcome == "applied"
+    warning = [note for note in phase.result.notes if note.startswith("WARNING")]
+    assert len(warning) == 1
+    assert "no Traefik install" in warning[0]
+    assert not (tmp_path / "not-installed").exists()

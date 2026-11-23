@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from dokploy_wizard.networking.cloudflare import (
     CloudflareAccessApplication,
@@ -17,6 +18,7 @@ from dokploy_wizard.networking.cloudflare import (
     CloudflareError,
     CloudflareTunnel,
 )
+from dokploy_wizard.networking.edge_https import TRAEFIK_DIR, apply_edge_https_config
 from dokploy_wizard.networking.models import (
     AccessPhase,
     AccessResult,
@@ -43,7 +45,10 @@ ACCESS_OTP_PROVIDER_RESOURCE_TYPE = "cloudflare_access_otp_provider"
 ACCESS_APPLICATION_RESOURCE_TYPE = "cloudflare_access_application"
 ACCESS_POLICY_RESOURCE_TYPE = "cloudflare_access_policy"
 
-_NON_PUBLIC_HOSTNAME_KEYS = {"openclaw-internal"}
+# Hostname keys that exist in desired state but must not get a public DNS
+# record or tunnel route (kept as the extension hook for future internal-only
+# surfaces, e.g. a re-exposed SeaweedFS S3 endpoint behind identity config).
+_NON_PUBLIC_HOSTNAME_KEYS: frozenset[str] = frozenset()
 _LITELLM_ADMIN_ACCESS_KEY = "litellm-admin"
 # Cloudflare ships each account with an unnamed One-time PIN provider, so this is only the
 # name the wizard gives the provider it creates and the label it shows operators.
@@ -70,6 +75,8 @@ def reconcile_networking(
     ownership_ledger: OwnershipLedger,
     backend: CloudflareBackend,
     connector_backend: Any | None = None,
+    traefik_dir: Path | None = None,
+    restart_traefik: Callable[[str], bool] | None = None,
 ) -> NetworkingPhase:
     credentials = _resolve_credentials(raw_env, desired_state, backend)
     backend.validate_account_access(credentials.account_id)
@@ -145,6 +152,47 @@ def reconcile_networking(
             tunnel.tunnel_id,
             ingress_rules,
         )
+
+    # HTTPS-only is enforced on this box, not in the zone: the tunnel re-encrypts
+    # every visitor request to :443, so a per-hostname Traefik router keyed on
+    # cloudflared's X-Forwarded-Proto is what actually turns plain HTTP away. The
+    # coder workspace wildcard route is deliberately excluded — a workspace may
+    # still choose to serve plain HTTP — and so are any other wildcard entries.
+    edge_hostnames = tuple(
+        sorted(
+            hostname
+            for hostname in _public_hostnames(
+                desired_state, litellm_admin_hostname=litellm_admin_hostname
+            ).values()
+            if not hostname.startswith("*.")
+        )
+    )
+    notes.extend(
+        apply_edge_https_config(
+            edge_hostnames,
+            traefik_dir=traefik_dir or TRAEFIK_DIR,
+            dry_run=dry_run,
+            restart=restart_traefik,
+        )
+    )
+
+    # Owned DNS records for hostnames that are no longer part of the desired
+    # state (a de-exposed pack endpoint, a hostname rename) must come out of
+    # the zone, or the stale CNAME keeps resolving to a tunnel route that
+    # already answers the terminal 404.
+    prune_notes = _prune_stale_dns_records(
+        dry_run=dry_run,
+        zone_id=credentials.zone_id,
+        dns_target=dns_target,
+        desired_hostnames=set(
+            _public_hostnames(
+                desired_state, litellm_admin_hostname=litellm_admin_hostname
+            ).values()
+        ),
+        ownership_ledger=ownership_ledger,
+        backend=backend,
+    )
+    notes.extend(prune_notes)
 
     connector = _resolve_connector(
         dry_run=dry_run,
@@ -293,7 +341,7 @@ def reconcile_cloudflare_access(
     }
     outcome = "plan_only" if dry_run else ("applied" if "create" in actions else "already_present")
     notes = [
-        "Cloudflare Access self-hosted applications are applied to advisor hostnames and the LiteLLM admin hostname."
+        "Cloudflare Access self-hosted applications are applied to the LiteLLM admin hostname."
     ]
     litellm_hostname = dict(target_hostnames).get(_LITELLM_ADMIN_ACCESS_KEY)
     if litellm_hostname is not None:
@@ -579,10 +627,6 @@ def _resolve_access_policy(
 
 
 def _access_display_name(pack_name: str) -> str:
-    if pack_name == "openclaw":
-        return "Nexa Claw"
-    if pack_name == "my-farm-advisor":
-        return "Nexa Farm"
     if pack_name == _LITELLM_ADMIN_ACCESS_KEY:
         return "LiteLLM Admin"
     return pack_name
@@ -591,11 +635,7 @@ def _access_display_name(pack_name: str) -> str:
 def _access_target_hostnames(
     *, raw_env: RawEnvInput, desired_state: DesiredState
 ) -> tuple[tuple[str, str], ...]:
-    target_hostnames: list[tuple[str, str]] = [
-        (key, desired_state.hostnames[key])
-        for key in ("openclaw", "my-farm-advisor")
-        if key in desired_state.enabled_packs and key in desired_state.hostnames
-    ]
+    target_hostnames: list[tuple[str, str]] = []
     litellm_hostname = resolve_litellm_admin_hostname(raw_env=raw_env, desired_state=desired_state)
     if litellm_hostname is not None:
         target_hostnames.append(
@@ -805,6 +845,55 @@ def _resolve_dns_records(
         f"Planned {len(planned_records)} Cloudflare DNS CNAME record(s) from desired hostnames."
     )
     return tuple(planned_records), resource_ids, tuple(notes)
+
+
+def _prune_stale_dns_records(
+    *,
+    dry_run: bool,
+    zone_id: str,
+    dns_target: str,
+    desired_hostnames: set[str],
+    ownership_ledger: OwnershipLedger,
+    backend: CloudflareBackend,
+) -> tuple[str, ...]:
+    notes: list[str] = []
+    for resource in ownership_ledger.resources:
+        if resource.resource_type != DNS_RESOURCE_TYPE:
+            continue
+        prefix = f"zone:{zone_id}:"
+        if not resource.scope.startswith(prefix):
+            continue
+        hostname = resource.scope.removeprefix(prefix)
+        if hostname in desired_hostnames:
+            continue
+        records = backend.list_dns_records(
+            zone_id,
+            hostname=hostname,
+            record_type="CNAME",
+            content=dns_target,
+        )
+        matching = next(
+            (record for record in records if record.record_id == resource.resource_id),
+            records[0] if records else None,
+        )
+        if matching is None:
+            notes.append(
+                f"DNS record for '{hostname}' left the zone; dropped its ledger entry."
+            )
+            continue
+        if dry_run:
+            notes.append(f"Would delete stale DNS record for '{hostname}'.")
+            continue
+        # Only delete a record that still carries this tunnel's target; an
+        # operator who repointed the name keeps their record.
+        if matching.content != dns_target:
+            notes.append(
+                f"DNS record for '{hostname}' no longer points at this tunnel; left in place."
+            )
+            continue
+        backend.delete_dns_record(zone_id, record_id=matching.record_id)
+        notes.append(f"Deleted stale DNS record for '{hostname}'.")
+    return tuple(notes)
 
 
 def _degradable_dns_conflict_hostnames(desired_state: DesiredState) -> set[str]:

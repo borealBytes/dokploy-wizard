@@ -291,7 +291,7 @@ def _shared_network_chat_completion_shell_command(
         "import json\n"
         "from pathlib import Path\n"
         f"payload = json.loads((Path({state_dir_value}) / 'litellm-generated-keys.json').read_text())\n"
-        "print(payload['virtual_keys']['openclaw'])\n"
+        "print(payload['virtual_keys']['coder-hermes'])\n"
         "PY\n"
         ") && "
         f"docker run --rm --network {shlex.quote(f'{stack_name}-shared')} {_CURL_IMAGE} -fsS "

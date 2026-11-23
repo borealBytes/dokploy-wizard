@@ -16,6 +16,12 @@ from dokploy_wizard.state import (
     write_ownership_ledger,
     write_target_state,
 )
+from dokploy_wizard.uninstall.planner import (
+    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
+    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
+    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -96,22 +102,22 @@ def _seed_state_dir(state_dir: Path) -> None:
                     "stack:nextcloud-stack:headscale",
                 ),
                 OwnedResource(
-                    "nextcloud_service",
+                    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
                     "nextcloud-stack-nextcloud",
                     "stack:nextcloud-stack:nextcloud-service",
                 ),
                 OwnedResource(
-                    "onlyoffice_service",
+                    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
                     "nextcloud-stack-onlyoffice",
                     "stack:nextcloud-stack:onlyoffice-service",
                 ),
                 OwnedResource(
-                    "nextcloud_volume",
+                    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
                     "nextcloud-stack-nextcloud-data",
                     "stack:nextcloud-stack:nextcloud-volume",
                 ),
                 OwnedResource(
-                    "onlyoffice_volume",
+                    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
                     "nextcloud-stack-onlyoffice-data",
                     "stack:nextcloud-stack:onlyoffice-volume",
                 ),
@@ -147,8 +153,8 @@ def test_retain_uninstall_preserves_data_resources_and_shrinks_checkpoint(tmp_pa
     assert {resource.resource_type for resource in loaded.ownership_ledger.resources} == {
         "shared_core_postgres",
         "shared_core_redis",
-        "nextcloud_volume",
-        "onlyoffice_volume",
+        NEXTCLOUD_VOLUME_RESOURCE_TYPE,
+        ONLYOFFICE_VOLUME_RESOURCE_TYPE,
     }
 
 

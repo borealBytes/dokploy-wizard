@@ -127,6 +127,9 @@ class DokployDocuSealBackend:
         self._client = client or DokployApiClient(api_url=api_url, api_key=api_key)
         self._applied_locator: _ComposeLocator | None = None
         self._created_in_process = False
+        # Notes minted by the compose no-op guard's verify call (see
+        # `_take_deferred_bootstrap_notes`); handed to the next full call.
+        self._deferred_bootstrap_notes: list[str] = []
 
     def get_service(self, resource_id: str) -> DocuSealResourceRecord | None:
         compose_id = _parse_resource_id(resource_id, "service")
@@ -231,7 +234,7 @@ class DokployDocuSealBackend:
         health_url = _health_url(self._hostname)
         if not _wait_for_local_https_health(health_url):
             raise DocuSealError("DocuSeal /up endpoint did not become locally reachable before setup.")
-        notes: list[str] = []
+        notes: list[str] = self._take_deferred_bootstrap_notes()
         if _docuseal_is_initialized(self._hostname):
             notes.append("DocuSeal already initialized; skipped internal setup flow.")
             return (
@@ -416,9 +419,23 @@ class DokployDocuSealBackend:
         self._applied_locator = locator
         return locator
 
+    def _take_deferred_bootstrap_notes(self) -> list[str]:
+        """Notes minted by an earlier verify call, once, oldest first.
+
+        `apply_compose_noop_guard` runs the verify lane on a hash match —
+        BEFORE the reconciler's note-keeping `ensure_application_ready` — and
+        a ServiceVerificationResult has no note surface, so side effects
+        executed there would otherwise vanish from the payload. The verify
+        lane therefore stows its notes here and the next full call carries
+        them (the gitea visibility migration documents the box measurement).
+        """
+        deferred = self._deferred_bootstrap_notes
+        self._deferred_bootstrap_notes = []
+        return deferred
+
     def _verify_current_application(self) -> ServiceVerificationResult:
         try:
-            self.ensure_application_ready(
+            _, bootstrap_notes = self.ensure_application_ready(
                 secret_key_base_secret_ref=self._secret_key_base_secret_ref,
             )
         except DocuSealError as error:
@@ -428,6 +445,9 @@ class DokployDocuSealBackend:
                 status="fail",
                 detail=str(error),
             )
+        # Side effects done, narration owed: hold the notes for the next
+        # note-keeping call (see `_take_deferred_bootstrap_notes`).
+        self._deferred_bootstrap_notes.extend(bootstrap_notes)
         return ServiceVerificationResult(
             service_name=self._compose_name,
             tier="app",

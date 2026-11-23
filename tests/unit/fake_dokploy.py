@@ -39,8 +39,11 @@ class FakeDokployApiClient:
     create_project_calls: int = 0
     next_compose_number: int = 1
     _ai_providers: list[DokployAiProvider] = field(default_factory=list)
+    # Monotonic so ids stay unique even after ai_provider_delete shrinks the list.
+    _next_ai_provider_id: int = field(default=1)
     _ai_provider_creates: list[dict[str, object]] = field(default_factory=list)
     _ai_provider_updates: list[dict[str, object]] = field(default_factory=list)
+    _ai_provider_deletes: list[str] = field(default_factory=list)
 
     def seed_existing_service(
         self,
@@ -172,7 +175,8 @@ class FakeDokployApiClient:
             "model": model,
             "isEnabled": is_enabled,
         })
-        ai_id = f"ai-{len(self._ai_providers) + 1}"
+        ai_id = f"ai-{self._next_ai_provider_id}"
+        self._next_ai_provider_id += 1
         provider = DokployAiProvider(
             ai_id=ai_id,
             name=name,
@@ -224,6 +228,11 @@ class FakeDokployApiClient:
         self._ai_providers.append(ai_provider)
         return ai_provider
 
+    def ai_provider_delete(self, *, ai_id: str) -> None:
+        self._ai_provider_deletes.append(ai_id)
+        self._ai_providers = [
+            provider for provider in self._ai_providers if provider.ai_id != ai_id
+        ]
 
     def ai_provider_test_connection(
         self, *, api_url: str, api_key: str, model: str

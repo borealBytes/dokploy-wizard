@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -14,6 +15,7 @@ import dokploy_wizard.dokploy.shared_core as shared_core_module
 from dokploy_wizard.core.models import SharedCoreResourceRecord, SharedPostgresAllocation
 from dokploy_wizard.core.planner import build_shared_core_plan
 from dokploy_wizard.core.reconciler import build_shared_core_ledger, reconcile_shared_core
+from dokploy_wizard.dokploy.client import DokployAiProvider
 from dokploy_wizard.dokploy.env_spec import RenderedCompose
 from dokploy_wizard.dokploy.shared_core import (
     DokploySharedCoreBackend,
@@ -22,10 +24,12 @@ from dokploy_wizard.dokploy.shared_core import (
 )
 from dokploy_wizard.litellm.admin import LiteLLMTeamRecord, LiteLLMVirtualKeyRecord
 from dokploy_wizard.state import (
+    LITELLM_GENERATED_KEYS_FILE,
     AppliedStateCheckpoint,
     ComposeArtifactHashState,
     resolve_desired_state,
     write_applied_checkpoint,
+    write_litellm_generated_keys,
 )
 from dokploy_wizard.state.models import (
     STATE_FORMAT_VERSION,
@@ -34,6 +38,7 @@ from dokploy_wizard.state.models import (
     OwnershipLedger,
     RawEnvInput,
 )
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 from .fake_dokploy import FakeDokployApiClient
 
@@ -145,7 +150,7 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
 
     plan = build_shared_core_plan(
         stack_name="openmerge",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
         values=values,
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
@@ -156,15 +161,11 @@ def test_litellm_plan_uses_openrouter_default_without_local_upstream() -> None:
     )
     for aliases in allowlists.values():
         assert "local-model.internal/unsloth-active" not in aliases
-    assert allowlists["my-farm-advisor"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
-    assert allowlists["openclaw"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
-    assert allowlists["dokploy-ai"] == (
-        "openrouter/deepseek/deepseek-v4.1-flash:free",
-    )
+    assert allowlists == {
+        "coder-hermes": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+        "coder-workspace-issuer": ("*",),
+        "dokploy-ai": ("openrouter/deepseek/deepseek-v4.1-flash:free",),
+    }
 
 
 def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> None:
@@ -178,7 +179,7 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
 
     plan = build_shared_core_plan(
         stack_name="openmerge",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
         values=values,
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=values, plan=plan)
@@ -187,19 +188,18 @@ def test_litellm_plan_keeps_local_default_when_local_upstream_is_active() -> Non
     assert plan.litellm.default_model_alias_order == (
         "local-model.internal/unsloth-active",
     )
-    assert allowlists["my-farm-advisor"] == (
-        "local-model.internal/unsloth-active",
-    )
-    assert allowlists["openclaw"] == (
-        "local-model.internal/unsloth-active",
-    )
+    assert allowlists == {
+        "coder-hermes": ("local-model.internal/unsloth-active",),
+        "coder-workspace-issuer": ("*",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+    }
 
 
 def test_litellm_db_allocation_is_dedicated_and_not_a_pack_allocation() -> None:
-    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("nextcloud", "openclaw"))
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("matrix", "moodle"))
 
     assert plan.litellm is not None
-    assert [allocation.pack_name for allocation in plan.allocations] == ["nextcloud", "openclaw"]
+    assert [allocation.pack_name for allocation in plan.allocations] == ["matrix", "moodle"]
     assert all(allocation.pack_name != "litellm" for allocation in plan.allocations)
     assert all(allocation.postgres != plan.litellm.postgres for allocation in plan.allocations)
     assert plan.litellm.postgres == SharedPostgresAllocation(
@@ -237,7 +237,7 @@ def test_reconcile_repairs_pack_and_litellm_postgres_allocations() -> None:
             values={
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MOODLE": "true",
             },
         )
     )
@@ -264,7 +264,7 @@ def test_reconcile_reuses_desired_network_when_ledger_points_to_stale_name() -> 
             values={
                 "STACK_NAME": "openmerge-me",
                 "ROOT_DOMAIN": "example.com",
-                "PACKS": "nextcloud",
+                "PACKS": "moodle",
             },
         )
     )
@@ -390,7 +390,7 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
             "LITELLM_OPENROUTER_MODELS": (
                 "openrouter/hunter-alpha=openrouter/openai/gpt-4.1-mini"
             ),
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-upstream-key",
+            "OPENROUTER_API_KEY": "legacy-openrouter-upstream-key",
         },
     )
     compose = rendered.compose_file
@@ -429,8 +429,13 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
         in compose
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "opencode-go-upstream-key"
-    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "farm-openrouter-upstream-key"
-    assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == ("wizard-stack-shared-litellm",)
+    assert env_specs["LITELLM_OPENROUTER_API_KEY"].value == "legacy-openrouter-upstream-key"
+    # The local key rides the provider env rails: the sync sidecar needs it too,
+    # to scan the endpoint's /v1/models and register what it finds.
+    assert env_specs["LITELLM_LOCAL_API_KEY"].target_services == (
+        "wizard-stack-shared-litellm",
+        "wizard-stack-shared-litellm-sync",
+    )
     assert env_specs["LITELLM_MASTER_KEY"].target_services == (
         "wizard-stack-shared-litellm",
         "wizard-stack-shared-litellm-sync",
@@ -449,14 +454,14 @@ def test_rendered_compose_includes_pinned_litellm_service_and_provider_env_refs(
         "wizard-stack-shared-litellm",
     )
     assert "opencode-go-upstream-key" not in compose
-    assert "farm-openrouter-upstream-key" not in compose
+    assert "legacy-openrouter-upstream-key" not in compose
     assert "    aliases:\n          - wizard-stack-shared-litellm\n" in compose
     assert '      - "127.0.0.1:4000:4000"' in compose
     assert "    expose:\n" not in compose
 
 
 def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("surfsense",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=())
 
     rendered = _render_compose_file(
         plan,
@@ -488,17 +493,21 @@ def test_rendered_litellm_local_model_disables_system_role_for_vllm_templates() 
     assert "SECRET" not in compose
 
 
-def test_rendered_shared_postgres_supports_surfsense_migration_requirements() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("surfsense",))
+def test_rendered_shared_postgres_pins_pgvector_image_without_logical_wal() -> None:
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
 
     rendered = _render_compose_file(plan, {}, {})
     compose = rendered.compose_file
 
     assert "image: pgvector/pgvector:pg16" in compose
-    assert 'command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]' in compose
-    assert 'run_sql "ALTER ROLE "wizard_stack_surfsense" WITH SUPERUSER;"' in compose
-    assert 'psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "wizard_stack_surfsense" -c "CREATE EXTENSION IF NOT EXISTS vector;"' in compose
-    assert 'run_sql "ALTER ROLE "wizard_stack_litellm" WITH SUPERUSER;"' not in compose
+    assert 'command: ["postgres"]' in compose
+    assert "wal_level=logical" not in compose
+    # Pack roles are LOGIN-scoped to their own database only; the superuser and
+    # extension-creation grants existed solely for a retired pack and must not
+    # creep back into the shared Postgres init script.
+    assert 'run_sql "ALTER ROLE "wizard_stack_matrix" WITH LOGIN PASSWORD' in compose
+    assert "WITH SUPERUSER" not in compose
+    assert "CREATE EXTENSION" not in compose
 
 
 def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
@@ -516,7 +525,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
             "OPENCODE_GO_API_KEY": "legacy-opencode-go-key",
             "LITELLM_OPENROUTER_MODELS": "google/gemma-4-31b-it:free",
             "LITELLM_OPENROUTER_API_KEY": "litellm-openrouter-key",
-            "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "legacy-openrouter-key",
+            "OPENROUTER_API_KEY": "legacy-openrouter-key",
         },
     )
     compose = rendered.compose_file
@@ -526,7 +535,7 @@ def test_rendered_compose_prefers_canonical_litellm_provider_env_refs() -> None:
     assert '      LITELLM_OPENROUTER_API_KEY: "${LITELLM_OPENROUTER_API_KEY:?LITELLM_OPENROUTER_API_KEY is required}"' in compose
     assert '      LITELLM_OPENCODE_GO_API_KEY: "${OPENCODE_GO_API_KEY}' not in compose
     assert (
-        '      LITELLM_OPENROUTER_API_KEY: "${MY_FARM_ADVISOR_OPENROUTER_API_KEY'
+        '      LITELLM_OPENROUTER_API_KEY: "${OPENROUTER_API_KEY'
         not in compose
     )
     assert env_specs["LITELLM_OPENCODE_GO_API_KEY"].value == "litellm-opencode-key"
@@ -635,6 +644,10 @@ def test_rendered_compose_uses_env_specs_for_generated_litellm_keys() -> None:
     assert env_specs["LITELLM_SALT_KEY"].value == "sk-salt-fake-test-key"
     assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].value == "sk-hermes-fake-test-key"
     assert env_specs["LITELLM_VIRTUAL_KEY_CODER_HERMES"].required is False
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_KDENSE"].value == "sk-kdense-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_CODER_KDENSE"].required is False
+    assert env_specs["LITELLM_VIRTUAL_KEY_DOKPLOY_AI"].value == "sk-dokploy-ai-fake-test-key"
+    assert env_specs["LITELLM_VIRTUAL_KEY_DOKPLOY_AI"].required is False
 
 
 def test_litellm_ledger_resource_is_owned() -> None:
@@ -670,7 +683,7 @@ def test_litellm_ledger_resource_is_owned() -> None:
 def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
@@ -750,7 +763,7 @@ def test_shared_core_matching_healthy_hash_skips_update_and_deploy(
 def test_shared_core_unhealthy_litellm_blocks_noop_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("matrix",))
     litellm_env = {
         "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
         "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
@@ -805,7 +818,7 @@ def test_shared_core_unhealthy_litellm_blocks_noop_skip(
 
 
 def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated_keys = _generated_keys()
     matching_records = tuple(
         LiteLLMVirtualKeyRecord(
@@ -813,7 +826,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             key_alias=consumer,
             team_id=f"team-{consumer}",
             models=("local-model.internal/unsloth-active",)
-            if consumer == "openclaw"
+            if consumer == "coder-hermes"
             else (),
             metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
         )
@@ -826,7 +839,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -835,8 +848,8 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
     )
     drifted_records = tuple(
         LiteLLMVirtualKeyRecord(
-            key="sk-openclaw-db-accepted-key"
-            if record.key_alias == "openclaw"
+            key="sk-coder-hermes-db-accepted-key"
+            if record.key_alias == "coder-hermes"
             else record.key,
             key_alias=record.key_alias,
             team_id=record.team_id,
@@ -852,7 +865,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -872,7 +885,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
             team_id=record.team_id,
             models=(
                 (*record.models, "sync/openrouter/deepseek/deepseek-v4.1-flash")
-                if record.key_alias == "openclaw"
+                if record.key_alias == "coder-hermes"
                 else record.models
             ),
             metadata=record.metadata,
@@ -886,7 +899,7 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         plan=plan,
         litellm_generated_keys=generated_keys,
         litellm_consumer_model_allowlists={
-            "openclaw": ("local-model.internal/unsloth-active",)
+            "coder-hermes": ("local-model.internal/unsloth-active",)
         },
         litellm_admin_api=_FakeLiteLLMAdminApi(
             {"status": "connected", "db": "connected"},
@@ -894,6 +907,186 @@ def test_shared_core_validates_litellm_virtual_key_state_matches_admin_db() -> N
         ),
     )
     assert sidecar_expanded_backend.validate_litellm_virtual_keys() is True
+
+
+def test_shared_core_validates_litellm_virtual_keys_against_hashed_token_material() -> None:
+    """Live /key/list payloads carry hashed token material, never the raw key.
+
+    Measured on the box: every wizard-managed alias returns
+    ``token == sha256(raw)`` with no raw key field. The validator must accept
+    that proof (raw-vs-hash string equality never converges, so every
+    noop-classified modify flagged permanent drift at 'shared_core' — the
+    second probe-parity bug the live proof surfaced, after the ingress one).
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=hashlib.sha256(value.encode()).hexdigest(),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    hashed_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=hashed_records,
+        ),
+    )
+    assert hashed_backend.validate_litellm_virtual_keys() is True
+
+    # A different hash under the same alias is a genuinely different token.
+    rotated_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key="0" * 64 if record.key_alias == "coder-hermes" else record.key,
+            key_alias=record.key_alias,
+            team_id=record.team_id,
+            models=record.models,
+            metadata=record.metadata,
+            token="0" * 64 if record.key_alias == "coder-hermes" else record.token,
+        )
+        for record in hashed_records
+    )
+    rotated_backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=rotated_records,
+        ),
+    )
+    assert rotated_backend.validate_litellm_virtual_keys() is False
+
+
+def test_shared_core_reconcile_does_not_adopt_hashed_material_back_into_state(
+    tmp_path: Path,
+) -> None:
+    """Adopt-back must never store /key/list's hashed token as the raw key.
+
+    Measured on the box: a no-drift pass where every wizard alias came back
+    with ``key == token == sha256(raw)`` rewrote litellm-generated-keys.json
+    with those hashes — irreversible (the raw was nowhere else), and every
+    later bake handed consumers a token the gateway rejects with 401
+    ("LiteLLM Virtual Key expected. Received=b56b****2a2d, expected to start
+    with 'sk-'"). The raw in state already proved itself through the hash, so
+    hashed list material must leave the state document byte-identical, while
+    a genuinely drifted alias is still replaced with its raw material.
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    write_litellm_generated_keys(tmp_path, generated_keys)
+    seeded_bytes = (tmp_path / LITELLM_GENERATED_KEYS_FILE).read_bytes()
+
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=hashlib.sha256(value.encode()).hexdigest(),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=_FakeLiteLLMAdminApi(
+            {"status": "connected", "db": "connected"},
+            keys=hashed_records,
+        ),
+        client=FakeDokployApiClient(),
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+
+    # No-drift adopt-back suppressed: the document keeps its raw material.
+    assert (tmp_path / LITELLM_GENERATED_KEYS_FILE).read_bytes() == seeded_bytes
+    assert backend._litellm_generated_keys is not None
+    assert backend._litellm_generated_keys.virtual_keys == generated_keys.virtual_keys
+
+
+def test_shared_core_reconcile_still_adopts_recreated_raw_key_after_value_drift(
+    tmp_path: Path,
+) -> None:
+    """The hashed-material guard must not blind the genuine drift path.
+
+    A wizard-managed alias whose live token hash does not match the state raw
+    is delete+recreated with the state raw; the reconciled record carries that
+    raw back (token=None), and adopt-back must still run — it just settles on
+    the same value, so the document keeps its raw material either way.
+    """
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
+    generated_keys = _generated_keys()
+    write_litellm_generated_keys(tmp_path, generated_keys)
+
+    hashed_records = tuple(
+        LiteLLMVirtualKeyRecord(
+            key=("0" * 64 if consumer == "coder-hermes" else hashlib.sha256(value.encode()).hexdigest()),
+            key_alias=consumer,
+            team_id=f"team-{consumer}",
+            models=("local-model.internal/unsloth-active",)
+            if consumer == "coder-hermes"
+            else (),
+            metadata={"consumer": consumer, "managed_by": "dokploy-wizard"},
+            token=("0" * 64 if consumer == "coder-hermes" else hashlib.sha256(value.encode()).hexdigest()),
+        )
+        for consumer, value in generated_keys.virtual_keys.items()
+    )
+    api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"}, keys=hashed_records)
+    backend = DokploySharedCoreBackend(
+        api_url="https://dokploy.example.com",
+        api_key="token",
+        stack_name="wizard-stack",
+        plan=plan,
+        litellm_generated_keys=generated_keys,
+        litellm_consumer_model_allowlists={
+            "coder-hermes": ("local-model.internal/unsloth-active",)
+        },
+        litellm_admin_api=api,
+        client=FakeDokployApiClient(),
+        state_dir=tmp_path,
+    )
+
+    backend.reconcile_litellm_runtime()
+
+    # The drifted alias was churn-replaced with the state raw (the hash proof
+    # said the old record was a different key), and the state document still
+    # holds raw material for every consumer.
+    recreated = api._keys["coder-hermes"]
+    assert recreated.key == "sk-hermes-fake-test-key"
+    assert recreated.token is None
+    doc = json.loads((tmp_path / LITELLM_GENERATED_KEYS_FILE).read_text(encoding="utf-8"))
+    assert doc["virtual_keys"] == generated_keys.virtual_keys
 
 
 def test_shared_core_find_container_name_prefers_exact_manual_name(
@@ -923,7 +1116,7 @@ def test_shared_core_find_container_name_prefers_exact_manual_name(
 def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("nextcloud",))
+    plan = build_shared_core_plan(stack_name="openmerge", enabled_packs=("matrix",))
     readiness_api = _FakeLiteLLMAdminApi({"status": "connected", "db": "connected"})
     postgres_container_names: list[str] = []
     redis_container_names: list[str] = []
@@ -983,10 +1176,10 @@ def test_shared_core_runtime_ready_uses_resolved_dokploy_container_names(
     assert redis_container_names == ["openmerge-shared-yqjzwd-openmerge-shared-redis-1"]
 
 
-def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
+def test_litellm_allowlists_keep_local_alias_for_every_consumer() -> None:
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
 
     allowlists = build_litellm_consumer_model_allowlists(
@@ -994,21 +1187,18 @@ def test_litellm_allowlists_keep_local_and_bare_aliases_for_advisors() -> None:
             "LITELLM_LOCAL_BASE_URL": "http://vllm.internal:8000/v1",
             "LITELLM_LOCAL_MODEL": "unsloth-active",
             "LITELLM_LOCAL_API_KEY": "sk-no-key-required",
-            "MY_FARM_ADVISOR_PRIMARY_MODEL": "local/unsloth-active",
-            "OPENCLAW_PRIMARY_MODEL": "local/unsloth-active",
         },
         plan=plan,
     )
 
-    assert allowlists["my-farm-advisor"] == (
-        "local-model.internal/unsloth-active",
-    )
-    assert allowlists["openclaw"] == (
-        "local-model.internal/unsloth-active",
-    )
+    assert allowlists == {
+        "coder-hermes": ("local-model.internal/unsloth-active",),
+        "coder-workspace-issuer": ("*",),
+        "dokploy-ai": ("local-model.internal/unsloth-active",),
+    }
 
 
-class _FakeLiteLLMAdminApi:
+class _FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(
         self,
         readiness_payload: dict[str, object],
@@ -1072,6 +1262,8 @@ class _FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -1079,6 +1271,7 @@ class _FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
@@ -1091,6 +1284,8 @@ class _FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -1098,12 +1293,18 @@ class _FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
 
     def delete_key(self, *, key_alias: str) -> None:
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
 
 def _generated_keys() -> LiteLLMGeneratedKeys:
@@ -1115,8 +1316,7 @@ def _generated_keys() -> LiteLLMGeneratedKeys:
             "coder-hermes": "sk-hermes-fake-test-key",
             "coder-kdense": "sk-kdense-fake-test-key",
             "dokploy-ai": "sk-dokploy-ai-fake-test-key",
-            "my-farm-advisor": "sk-farm-fake-test-key",
-            "openclaw": "sk-openclaw-fake-test-key",
+            "nextcloud": "sk-nextcloud-fake-test-key",
         },
     )
 
@@ -1272,6 +1472,8 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
             else:
                 body = json.loads(str(raw_data))
         calls.append((method, path, body))
+        if path == "/api/ai.delete":
+            return True
         if method == "POST":
             return {
                 "data": {
@@ -1337,6 +1539,40 @@ def test_ai_client_request_payloads_via_fake_request_fn() -> None:
         },
     )
 
+    client.ai_provider_delete(ai_id="ai-fake-1")
+    assert len(calls) == 4
+    assert calls[3] == ("POST", "/api/ai.delete", {"aiId": "ai-fake-1"})
+
+
+def test_ai_get_all_tolerates_hidden_api_key() -> None:
+    """Current upstream ai.getAll selects the row without apiKey."""
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    row_without_key = {
+        "aiId": "ai-fake-1",
+        "name": "Dokploy Wizard LiteLLM",
+        "apiUrl": "http://openmerge-shared-litellm:4000/v1",
+        "model": "local-model.internal/unsloth-active",
+        "isEnabled": True,
+    }
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        return [row_without_key]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test/api",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    providers = client.ai_providers_all()
+
+    assert providers[0].api_key == ""
+    assert providers[0].ai_id == "ai-fake-1"
+
 
 def test_ai_model_alias_default_with_no_env() -> None:
     from dokploy_wizard.dokploy.shared_core import _dokploy_ai_model_alias
@@ -1395,17 +1631,56 @@ def test_ai_model_alias_partial_env_falls_back_to_default() -> None:
     assert _dokploy_ai_model_alias({"AI_DEFAULT_MODEL": "model-x"}) == "opencode-go/deepseek-v4.1-flash"
 
 
-def test_ai_reconcile_creates_provider_when_missing() -> None:
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
+_DEFAULT_AI_ALIAS = "opencode-go/deepseek-v4.1-flash"
 
-    fake = FakeDokployApiClient()
-    generated = _generated_keys()
+
+def _ai_reconcile(
+    fake: FakeDokployApiClient,
+    generated: LiteLLMGeneratedKeys,
+    *,
+    litellm_service_name: str = "openmerge-shared-litellm",
+    litellm_env: dict[str, str] | None = None,
+    dokploy_ai_allowlist: tuple[str, ...] = (_DEFAULT_AI_ALIAS,),
+) -> None:
+    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
 
     _ensure_dokploy_ai_provider(
         client=fake,
-        litellm_service_name="openmerge-shared-litellm",
+        litellm_service_name=litellm_service_name,
         generated_keys=generated,
+        litellm_env=litellm_env,
+        consumer_allowlists={"dokploy-ai": dokploy_ai_allowlist},
     )
+
+
+def _wizard_provider_row(
+    *,
+    ai_id: str,
+    model: str,
+    name: str | None = None,
+    api_url: str = "http://openmerge-shared-litellm:4000/v1",
+    api_key: str = "sk-dokploy-ai-fake-test-key",
+    is_enabled: bool = True,
+) -> DokployAiProvider:
+    if name is None or name == _DEFAULT_AI_ALIAS:
+        row_name = "Dokploy Wizard LiteLLM"
+    else:
+        row_name = f"Dokploy Wizard LiteLLM · {name}"
+    return DokployAiProvider(
+        ai_id=ai_id,
+        name=row_name,
+        api_url=api_url,
+        api_key=api_key,
+        model=model,
+        is_enabled=is_enabled,
+    )
+
+
+def test_ai_reconcile_creates_provider_when_missing() -> None:
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+
+    _ai_reconcile(fake, generated)
 
     assert len(fake._ai_provider_creates) == 1
     assert len(fake._ai_provider_updates) == 0
@@ -1414,31 +1689,22 @@ def test_ai_reconcile_creates_provider_when_missing() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(fake._ai_provider_creates[0], generated)
     )
-    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4.1-flash"
+    assert fake._ai_provider_creates[0]["model"] == _DEFAULT_AI_ALIAS
     assert fake._ai_provider_creates[0]["isEnabled"] is True
 
 
 def test_ai_reconcile_updates_provider_when_present() -> None:
-    from dokploy_wizard.dokploy.client import DokployAiProvider
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
-    existing = DokployAiProvider(
+    existing = _wizard_provider_row(
         ai_id="ai-wizard-existing",
-        name="Dokploy Wizard LiteLLM",
+        model="bare-model",
         api_url="http://old-url:4000/v1",
         api_key="<redacted-old-provider-key>",
-        model="bare-model",
-        is_enabled=True,
     )
     fake._ai_providers = [existing]
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
-        litellm_service_name="openmerge-shared-litellm",
-        generated_keys=generated,
-    )
+    _ai_reconcile(fake, generated)
 
     assert len(fake._ai_provider_creates) == 0
     assert len(fake._ai_provider_updates) == 1
@@ -1447,37 +1713,34 @@ def test_ai_reconcile_updates_provider_when_present() -> None:
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
     )
-    assert update["model"] == "opencode-go/deepseek-v4.1-flash"
+    assert update["model"] == _DEFAULT_AI_ALIAS
 
 
 def test_ai_reconcile_does_not_create_duplicate_on_repeat() -> None:
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(client=fake, litellm_service_name="openmerge-shared-litellm", generated_keys=generated)
-    _ensure_dokploy_ai_provider(client=fake, litellm_service_name="openmerge-shared-litellm", generated_keys=generated)
-    _ensure_dokploy_ai_provider(client=fake, litellm_service_name="openmerge-shared-litellm", generated_keys=generated)
+    _ai_reconcile(fake, generated)
+    _ai_reconcile(fake, generated)
+    _ai_reconcile(fake, generated)
 
     assert len(fake._ai_provider_creates) == 1
     _require_mutation_count(len(fake._ai_provider_updates), 0, label="provider update")
+    _require_mutation_count(len(fake._ai_provider_deletes), 0, label="provider delete")
 
 
 def test_ai_reconcile_uses_canonical_model_alias_not_bare() -> None:
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(client=fake, litellm_service_name="openmerge-shared-litellm", generated_keys=generated)
+    _ai_reconcile(fake, generated)
 
     for create in fake._ai_provider_creates:
         assert create["model"] != "unsloth-active"
-        assert create["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert create["model"] == _DEFAULT_AI_ALIAS
     for update in fake._ai_provider_updates:
         assert update["model"] != "unsloth-active"
-        assert update["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert update["model"] == _DEFAULT_AI_ALIAS
 
 
 def test_ai_reconcile_skips_when_no_generated_keys() -> None:
@@ -1485,7 +1748,12 @@ def test_ai_reconcile_skips_when_no_generated_keys() -> None:
 
     fake = FakeDokployApiClient()
 
-    _ensure_dokploy_ai_provider(client=fake, litellm_service_name="openmerge-shared-litellm", generated_keys=None)
+    _ensure_dokploy_ai_provider(
+        client=fake,
+        litellm_service_name="openmerge-shared-litellm",
+        generated_keys=None,
+        consumer_allowlists={},
+    )
 
     assert len(fake._ai_provider_creates) == 0
     assert len(fake._ai_provider_updates) == 0
@@ -1493,7 +1761,6 @@ def test_ai_reconcile_skips_when_no_generated_keys() -> None:
 
 def test_ai_reconcile_fails_clearly_when_dokploy_ai_virtual_key_missing() -> None:
     from dokploy_wizard.core import SharedCoreError
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
 
     fake = FakeDokployApiClient()
     generated = _generated_keys()
@@ -1509,28 +1776,17 @@ def test_ai_reconcile_fails_clearly_when_dokploy_ai_virtual_key_missing() -> Non
     )
 
     with pytest.raises(SharedCoreError, match="dokploy-ai"):
-        _ensure_dokploy_ai_provider(
-            client=fake,
-            litellm_service_name="openmerge-shared-litellm",
-            generated_keys=missing_dokploy_ai,
-        )
+        _ai_reconcile(fake, missing_dokploy_ai)
 
     assert len(fake._ai_provider_creates) == 0
     assert len(fake._ai_provider_updates) == 0
 
 
 def test_ai_reconcile_uses_internal_litellm_url() -> None:
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
-        litellm_service_name="openmerge-shared-litellm",
-        generated_keys=generated,
-        litellm_env={},
-    )
+    _ai_reconcile(fake, generated, litellm_env={})
 
     assert fake._ai_provider_creates[0]["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
     api_url = fake._ai_provider_creates[0]["apiUrl"]
@@ -1539,15 +1795,13 @@ def test_ai_reconcile_uses_internal_litellm_url() -> None:
 
 
 def test_ai_reconcile_uses_custom_provider_alias() -> None:
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
+    _ai_reconcile(
+        fake,
+        generated,
         litellm_service_name="my-stack-shared-litellm",
-        generated_keys=generated,
         litellm_env={
             "AI_DEFAULT_PROVIDER": "custom.example.internal",
             "AI_DEFAULT_MODEL": "agent-model",
@@ -1555,14 +1809,11 @@ def test_ai_reconcile_uses_custom_provider_alias() -> None:
     )
 
     assert len(fake._ai_provider_creates) == 1
-    assert fake._ai_provider_creates[0]["model"] == "opencode-go/deepseek-v4.1-flash"
+    assert fake._ai_provider_creates[0]["model"] == _DEFAULT_AI_ALIAS
     assert fake._ai_provider_creates[0]["apiUrl"] == "http://my-stack-shared-litellm:4000/v1"
 
 
 def test_ai_reconcile_preserves_user_owned_providers_and_creates_wizard_provider() -> None:
-    from dokploy_wizard.dokploy.client import DokployAiProvider
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     user_provider = DokployAiProvider(
         ai_id="ai-user-provider",
@@ -1575,11 +1826,7 @@ def test_ai_reconcile_preserves_user_owned_providers_and_creates_wizard_provider
     fake._ai_providers = [user_provider]
     generated = _generated_keys()
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
-        litellm_service_name="openmerge-shared-litellm",
-        generated_keys=generated,
-    )
+    _ai_reconcile(fake, generated)
 
     assert fake.ai_providers_all()[0] == user_provider
     assert len(fake._ai_provider_creates) == 1
@@ -1590,72 +1837,202 @@ def test_ai_reconcile_preserves_user_owned_providers_and_creates_wizard_provider
 
 
 def test_ai_reconcile_noops_when_existing_wizard_provider_matches() -> None:
-    from dokploy_wizard.dokploy.client import DokployAiProvider
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
     fake._ai_providers = [
-        DokployAiProvider(
-            ai_id="ai-wizard-existing",
-            name="Dokploy Wizard LiteLLM",
-            api_url="http://openmerge-shared-litellm:4000/v1",
-            api_key=generated.virtual_keys["dokploy-ai"],
-            model="opencode-go/deepseek-v4.1-flash",
-            is_enabled=True,
-        )
+        _wizard_provider_row(ai_id="ai-wizard-existing", model=_DEFAULT_AI_ALIAS)
     ]
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
-        litellm_service_name="openmerge-shared-litellm",
-        generated_keys=generated,
-    )
+    _ai_reconcile(fake, generated)
 
     _require_mutation_count(len(fake._ai_provider_creates), 0, label="provider create")
+    _require_mutation_count(len(fake._ai_provider_updates), 0, label="provider update")
+    _require_mutation_count(len(fake._ai_provider_deletes), 0, label="provider delete")
+
+
+def test_ai_reconcile_treats_hidden_api_key_as_not_drifted() -> None:
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+    fake._ai_providers = [
+        _wizard_provider_row(ai_id="ai-wizard-existing", model=_DEFAULT_AI_ALIAS, api_key="")
+    ]
+
+    _ai_reconcile(fake, generated)
+
+    # Current upstream ai.getAll hides apiKey; a blank visible key must not
+    # force an update on every pass or the AI rows would never be no-op.
     _require_mutation_count(len(fake._ai_provider_updates), 0, label="provider update")
 
 
 def test_ai_reconcile_updates_disabled_or_drifted_wizard_provider() -> None:
-    from dokploy_wizard.dokploy.client import DokployAiProvider
-    from dokploy_wizard.dokploy.shared_core import _ensure_dokploy_ai_provider
-
     fake = FakeDokployApiClient()
     generated = _generated_keys()
     fake._ai_providers = [
-        DokployAiProvider(
+        _wizard_provider_row(
             ai_id="ai-wizard-existing",
-            name="Dokploy Wizard LiteLLM",
+            model="wrong/model",
             api_url="http://wrong-litellm:4000/v1",
             api_key="<redacted-wrong-provider-key>",
-            model="wrong/model",
             is_enabled=False,
         )
     ]
 
-    _ensure_dokploy_ai_provider(
-        client=fake,
-        litellm_service_name="openmerge-shared-litellm",
-        generated_keys=generated,
-    )
+    _ai_reconcile(fake, generated)
 
     assert len(fake._ai_provider_creates) == 0
     assert len(fake._ai_provider_updates) == 1
     update = fake._ai_provider_updates[0]
     assert update["aiId"] == "ai-wizard-existing"
     assert update["apiUrl"] == "http://openmerge-shared-litellm:4000/v1"
-    assert update["model"] == "opencode-go/deepseek-v4.1-flash"
+    assert update["model"] == _DEFAULT_AI_ALIAS
     assert update["isEnabled"] is True
     _require_provider_payload_uses_dokploy_ai_virtual_key(
         _provider_payload_uses_dokploy_ai_virtual_key(update, generated)
     )
 
 
+def test_ai_reconcile_seeds_one_row_per_allowed_alias() -> None:
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+
+    _ai_reconcile(
+        fake,
+        generated,
+        dokploy_ai_allowlist=(
+            _DEFAULT_AI_ALIAS,
+            "openrouter/openrouter/hunter-alpha",
+            "local-model.internal/unsloth-active",
+        ),
+    )
+
+    assert len(fake._ai_provider_creates) == 3
+    by_model = {str(create["model"]): create for create in fake._ai_provider_creates}
+    assert set(by_model) == {
+        _DEFAULT_AI_ALIAS,
+        "openrouter/openrouter/hunter-alpha",
+        "local-model.internal/unsloth-active",
+    }
+    assert by_model[_DEFAULT_AI_ALIAS]["name"] == "Dokploy Wizard LiteLLM"
+    assert (
+        by_model["openrouter/openrouter/hunter-alpha"]["name"]
+        == "Dokploy Wizard LiteLLM · openrouter/openrouter/hunter-alpha"
+    )
+    for create in fake._ai_provider_creates:
+        _require_provider_payload_uses_dokploy_ai_virtual_key(
+            _provider_payload_uses_dokploy_ai_virtual_key(create, generated)
+        )
+        assert create["isEnabled"] is True
+
+
+def test_ai_reconcile_deletes_wizard_rows_outside_allowed_aliases() -> None:
+    stale = _wizard_provider_row(
+        ai_id="ai-wizard-stale",
+        name="retired/alias",
+        model="retired/alias",
+    )
+    user_keeper = DokployAiProvider(
+        ai_id="ai-user-keeper",
+        name="Personal LiteLLM",
+        api_url="https://user-provider.example/v1",
+        api_key="<redacted-user-provider-key>",
+        model="user/model",
+        is_enabled=True,
+    )
+    fake = FakeDokployApiClient()
+    fake._ai_providers = [
+        _wizard_provider_row(ai_id="ai-wizard-default", model=_DEFAULT_AI_ALIAS),
+        stale,
+        user_keeper,
+    ]
+    generated = _generated_keys()
+
+    _ai_reconcile(fake, generated)
+
+    _require_mutation_count(len(fake._ai_provider_creates), 0, label="provider create")
+    _require_mutation_count(len(fake._ai_provider_updates), 0, label="provider update")
+    assert fake._ai_provider_deletes == ["ai-wizard-stale"]
+    assert fake.ai_providers_all()[1] == user_keeper
+
+
+def test_ai_reconcile_deduplicates_alias_rows_keeping_one() -> None:
+    alias = "openrouter/openrouter/hunter-alpha"
+    keeper = _wizard_provider_row(ai_id="ai-wizard-keeper", name=alias, model=alias)
+    duplicate = _wizard_provider_row(ai_id="ai-wizard-duplicate", name=alias, model=alias)
+    fake = FakeDokployApiClient()
+    fake._ai_providers = [
+        _wizard_provider_row(ai_id="ai-wizard-default", model=_DEFAULT_AI_ALIAS),
+        keeper,
+        duplicate,
+    ]
+    generated = _generated_keys()
+
+    _ai_reconcile(fake, generated, dokploy_ai_allowlist=(_DEFAULT_AI_ALIAS, alias))
+
+    _require_mutation_count(len(fake._ai_provider_creates), 0, label="provider create")
+    _require_mutation_count(len(fake._ai_provider_updates), 0, label="provider update")
+    assert fake._ai_provider_deletes == ["ai-wizard-duplicate"]
+
+
+def test_ai_reconcile_wildcard_allowlist_widens_with_live_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        shared_core_module,
+        "_litellm_exposed_aliases",
+        lambda **kwargs: ("sync/sglang/qwen3-coder", _DEFAULT_AI_ALIAS),
+    )
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+
+    _ai_reconcile(fake, generated, dokploy_ai_allowlist=(_DEFAULT_AI_ALIAS, "sync/*"))
+
+    models = {str(create["model"]) for create in fake._ai_provider_creates}
+    assert models == {_DEFAULT_AI_ALIAS, "sync/sglang/qwen3-coder"}
+    # The sync wildcard itself is a key-level grant, never a provider row.
+    assert "sync/*" not in models
+
+
+def test_ai_reconcile_wildcard_allowlist_survives_unreachable_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        shared_core_module,
+        "_litellm_exposed_aliases",
+        lambda **kwargs: None,
+    )
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+
+    _ai_reconcile(fake, generated, dokploy_ai_allowlist=(_DEFAULT_AI_ALIAS, "sync/*"))
+
+    models = {str(create["model"]) for create in fake._ai_provider_creates}
+    assert models == {_DEFAULT_AI_ALIAS}
+
+
+def test_ai_reconcile_renames_legacy_base_row_to_default_alias_row() -> None:
+    fake = FakeDokployApiClient()
+    generated = _generated_keys()
+    legacy = _wizard_provider_row(
+        ai_id="ai-wizard-legacy",
+        model="opencode-go/legacy-model",
+        api_key="<redacted-legacy-key>",
+    )
+    fake._ai_providers = [legacy]
+
+    _ai_reconcile(fake, generated)
+
+    assert len(fake._ai_provider_creates) == 0
+    assert len(fake._ai_provider_updates) == 1
+    assert fake._ai_provider_updates[0]["aiId"] == "ai-wizard-legacy"
+    assert fake._ai_provider_updates[0]["model"] == _DEFAULT_AI_ALIAS
+    assert fake._ai_provider_updates[0]["name"] == "Dokploy Wizard LiteLLM"
+
+
 def test_litellm_runtime_reconciles_dokploy_ai_provider_even_when_virtual_keys_unchanged() -> None:
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("local-model.internal/unsloth-active",),
+        "coder-hermes": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -1697,10 +2074,10 @@ def test_litellm_runtime_surfaces_dokploy_ai_provider_seed_failures() -> None:
         def ai_providers_all(self):  # type: ignore[no-untyped-def]
             raise DokployApiError("Dokploy AI provider list failed visibly.")
 
-    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("openclaw",))
+    plan = build_shared_core_plan(stack_name="wizard-stack", enabled_packs=("coder",))
     generated = _generated_keys()
     allowlists: dict[str, tuple[str, ...]] = {
-        "openclaw": ("local-model.internal/unsloth-active",),
+        "coder-hermes": ("local-model.internal/unsloth-active",),
     }
     teams, keys = _managed_litellm_records_for(
         generated,
@@ -1822,7 +2199,8 @@ def test_verify_dokploy_ai_provider_fails_on_duplicate_wizard_provider() -> None
     )
 
     assert result.passed is False
-    assert "duplicate_wizard_provider" in result.detail
+    assert "provider_state_drift" in result.detail
+    assert "duplicate_aliases" in result.detail
 
 
 def test_rendered_litellm_service_attaches_to_dokploy_network_with_alias() -> None:
@@ -1947,9 +2325,11 @@ def test_rendered_compose_includes_model_sync_sidecar() -> None:
     assert "condition: service_healthy" in compose
     assert '"CMD", "python3", "/app/model_sync.py", "--healthcheck"' in compose
     assert "store_model_in_db: true" in compose
-    assert '"alias_prefix": "sync/openrouter"' in compose
-    assert '"alias_prefix": "sync/opencode-go"' in compose
-    assert '"alias_prefix": "sync/nvidia"' in compose
+    assert '"name": "openrouter"' in compose
+    assert '"name": "opencode-go"' in compose
+    assert '"name": "nvidia"' in compose
+    assert '"cost_catalog_provider": "nvidia"' in compose
+    assert '"cost_catalog_provider": "opencode-go"' in compose
     assert "openrouter-upstream-key" not in compose
 
 
@@ -1991,8 +2371,8 @@ def test_rendered_compose_model_sync_honors_provider_subset_and_interval() -> No
     compose = rendered.compose_file
 
     assert 'MODEL_SYNC_INTERVAL_MINUTES: "30"' in compose
-    assert '"alias_prefix": "sync/openrouter"' in compose
-    assert '"alias_prefix": "sync/opencode-go"' not in compose
+    assert '"name": "openrouter"' in compose
+    assert '"name": "opencode-go"' not in compose
 
 
 def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
@@ -2004,10 +2384,11 @@ def test_consumer_virtual_keys_receive_sync_wildcard() -> None:
     )
 
     assert all(consumer in key_lists for consumer in allowlists)
-    assert key_lists["openclaw"][-1] == "sync/*"
-    assert key_lists["surfsense"][-1] == "sync/*"
-    assert "sync/*" not in key_lists["dokploy-ai"]
-    assert "sync/*" not in allowlists["openclaw"]
+    assert key_lists["coder-hermes"][-1] == "sync/*"
+    # The wildcard reaches every consumer key, including the two built-in AI
+    # surfaces; the provider-row seeder strips it rather than making a "sync/*" row.
+    assert key_lists["dokploy-ai"][-1] == "sync/*"
+    assert "sync/*" not in allowlists["coder-hermes"]
 
     disabled = shared_core_module._litellm_key_model_allowlists(
         allowlists, litellm_env={**_MODEL_SYNC_ENV, "LITELLM_MODEL_SYNC_ENABLED": "0"}
@@ -2034,10 +2415,10 @@ def test_push_model_sync_consumer_keys_writes_state_file_atomically(
     monkeypatch.setattr("dokploy_wizard.dokploy.shared_core.subprocess.run", fake_run)
 
     assert shared_core_module._push_model_sync_consumer_keys(
-        "sync-container", {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+        "sync-container", {"coder-hermes": "sk-1"}
     )
     assert captured_cmd[:4] == ["docker", "exec", "-i", "sync-container"]
-    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1", "surfsense": "sk-2"}
+    assert json.loads(captured_input[0]) == {"coder-hermes": "sk-1"}
     shell = " ".join(captured_cmd)
     assert "consumer-keys.json.tmp" in shell and "mv" in shell
 
@@ -2075,3 +2456,148 @@ def test_model_sync_first_cycle_completed_polls_healthcheck(
     assert not shared_core_module._model_sync_first_cycle_completed(
         "sync-container", attempts=2, delay_seconds=0.0, sleep_fn=lambda _s: None
     )
+
+
+def _ai_row(
+    *,
+    ai_id: str,
+    name: str = "Dokploy Wizard LiteLLM",
+    model: str = "opencode-go/deepseek-v4.1-flash",
+) -> dict[str, object]:
+    return {
+        "aiId": ai_id,
+        "name": name,
+        "apiUrl": "http://openmerge-shared-litellm:4000/v1",
+        "model": model,
+        "isEnabled": True,
+    }
+
+
+def test_ai_provider_create_recovers_record_from_empty_mutation_response() -> None:
+    """Upstream ai.create answers [] after inserting the row; the client must
+    recover the record from ai.getAll instead of failing."""
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    calls: list[str] = []
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        path = req.full_url.removeprefix("http://dokploy.test")
+        calls.append(path)
+        if path == "/api/ai.create":
+            return []
+        return [_ai_row(ai_id="ai-real-1")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_create(
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-1"
+    assert provider.api_key == ""
+    assert calls == ["/api/ai.create", "/api/ai.getAll"]
+
+
+def test_ai_provider_create_recovers_record_from_scalar_mutation_response() -> None:
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        if req.full_url.endswith("/api/ai.create"):
+            return True
+        return [_ai_row(ai_id="ai-real-2")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_create(
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-2"
+
+
+def test_ai_provider_update_recovers_record_from_empty_mutation_response() -> None:
+    from urllib import request
+
+    from dokploy_wizard.dokploy.client import DokployApiClient
+
+    calls: list[str] = []
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        path = req.full_url.removeprefix("http://dokploy.test")
+        calls.append(path)
+        if path == "/api/ai.update":
+            return []
+        return [_ai_row(ai_id="ai-real-3")]
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    provider = client.ai_provider_update(
+        ai_id="ai-real-3",
+        name="Dokploy Wizard LiteLLM",
+        api_url="http://openmerge-shared-litellm:4000/v1",
+        api_key="sk-ai-key",
+        model="opencode-go/deepseek-v4.1-flash",
+        is_enabled=True,
+    )
+
+    assert provider.ai_id == "ai-real-3"
+    assert calls == ["/api/ai.update", "/api/ai.getAll"]
+
+
+def test_ai_provider_mutation_recovery_requires_single_match() -> None:
+    from urllib import request
+
+    import pytest
+
+    from dokploy_wizard.dokploy.client import DokployApiClient, DokployApiError
+
+    rows = [_ai_row(ai_id="ai-dup-1"), _ai_row(ai_id="ai-dup-2")]
+
+    def fake_request(req: object) -> object:
+        assert isinstance(req, request.Request)
+        if req.full_url.endswith("/api/ai.create"):
+            return []
+        return rows
+
+    client = DokployApiClient(
+        api_url="http://dokploy.test",
+        api_key="fake-key",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="recovery found 2 matching records"):
+
+        client.ai_provider_create(
+            name="Dokploy Wizard LiteLLM",
+            api_url="http://openmerge-shared-litellm:4000/v1",
+            api_key="sk-ai-key",
+            model="opencode-go/deepseek-v4.1-flash",
+            is_enabled=True,
+        )

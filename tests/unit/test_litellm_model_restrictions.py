@@ -7,10 +7,10 @@ Default offline contract:
 Opt-in live post-deploy verification:
   LITELLM_QA_ENABLE_LIVE=1 \
   LITELLM_QA_BASE_URL=https://litellm.example.com \
-  LITELLM_QA_KEY_MY_FARM_ADVISOR=sk-... \
-  LITELLM_QA_KEY_OPENCLAW=sk-... \
   LITELLM_QA_KEY_CODER_HERMES=sk-... \
   LITELLM_QA_KEY_CODER_KDENSE=sk-... \
+  LITELLM_QA_KEY_DOKPLOY_AI=sk-... \
+  LITELLM_QA_KEY_CODER_WORKSPACE_ISSUER=sk-... \
   pytest tests/unit/test_litellm_model_restrictions.py -q -k live
 
 The live path intentionally avoids `/health` because LiteLLM docs note that `/health`
@@ -38,25 +38,28 @@ from dokploy_wizard.litellm.admin import (
 )
 from dokploy_wizard.litellm.config_renderer import build_litellm_config
 from dokploy_wizard.litellm.model_catalog import DEFAULT_LOCAL_CANONICAL_ALIAS
+from tests.helpers.litellm_group_fakes import LiteLLMGroupApiStub
 
 EXPECTED_VISIBLE_MODELS: dict[str, tuple[str, ...]] = {
-    "my-farm-advisor": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
-    "openclaw": (
-        DEFAULT_LOCAL_CANONICAL_ALIAS,
-        "openrouter/anthropic/claude-3.5-sonnet",
-    ),
     "coder-hermes": (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
     ),
-    "coder-kdense": (
+    "dokploy-ai": (
         DEFAULT_LOCAL_CANONICAL_ALIAS,
         "openrouter/anthropic/claude-3.5-sonnet",
     ),
+    # coder-workspace-issuer is intentionally absent: it is a minting-scoped
+    # key with a wildcard ("*") allowlist, not a chat consumer, so it has no
+    # fixed visible-model set to pin here.
 }
+# Every consumer key projects the same shared alias set; the built-in AI surfaces
+# are no longer pinned to the single default alias, so the cost-metadata probe runs
+# against all of them.
+SHARED_ALIAS_CONSUMERS = (
+    "coder-hermes",
+    "dokploy-ai",
+)
 EXPECTED_MODEL_INFO_COSTS: dict[str, dict[str, float]] = {
     "openrouter/anthropic/claude-3.5-sonnet": {
         "input_cost_per_token": 0.000003,
@@ -67,11 +70,14 @@ UNCONFIGURED_OPENROUTER_MODEL = "openrouter/google/gemma-4-31b-it:free"
 DENIED_BARE_LOCAL_ALIAS = "unsloth-active"
 
 LIVE_KEY_ENV_BY_CONSUMER = {
-    "my-farm-advisor": "LITELLM_QA_KEY_MY_FARM_ADVISOR",
-    "openclaw": "LITELLM_QA_KEY_OPENCLAW",
     "coder-hermes": "LITELLM_QA_KEY_CODER_HERMES",
     "coder-kdense": "LITELLM_QA_KEY_CODER_KDENSE",
+    "dokploy-ai": "LITELLM_QA_KEY_DOKPLOY_AI",
+    "coder-workspace-issuer": "LITELLM_QA_KEY_CODER_WORKSPACE_ISSUER",
 }
+
+
+
 
 
 @dataclass(frozen=True)
@@ -80,7 +86,7 @@ class HarnessResponse:
     json_body: object
 
 
-class FakeLiteLLMAdminApi:
+class FakeLiteLLMAdminApi(LiteLLMGroupApiStub):
     def __init__(self) -> None:
         self._teams: dict[str, LiteLLMTeamRecord] = {}
         self._keys: dict[str, LiteLLMVirtualKeyRecord] = {}
@@ -135,6 +141,8 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -142,6 +150,7 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
@@ -154,6 +163,8 @@ class FakeLiteLLMAdminApi:
         team_id: str | None,
         models: tuple[str, ...],
         metadata: Mapping[str, object] | None = None,
+        allowed_routes: tuple[str, ...] | None = None,
+        user_id: str | None = None,
     ) -> LiteLLMVirtualKeyRecord:
         record = LiteLLMVirtualKeyRecord(
             key=key,
@@ -161,12 +172,18 @@ class FakeLiteLLMAdminApi:
             team_id=team_id,
             models=models,
             metadata=dict(metadata or {}),
+            user_id=user_id,
         )
         self._keys[key_alias] = record
         return record
 
     def delete_key(self, *, key_alias: str) -> None:
         self._keys.pop(key_alias, None)
+
+    def delete_team(self, *, team_id: str) -> None:
+        for alias, team in list(self._teams.items()):
+            if team.team_id == team_id:
+                del self._teams[alias]
 
 
 class FakeLiteLLMRestrictionHarness:
@@ -318,10 +335,10 @@ def _qa_flat_env() -> dict[str, str]:
 
 def _expected_consumer_keys() -> dict[str, str]:
     return {
-        "my-farm-advisor": "sk-test-my-farm-advisor",
-        "openclaw": "sk-test-openclaw",
         "coder-hermes": "sk-test-coder-hermes",
         "coder-kdense": "sk-test-coder-kdense",
+        "dokploy-ai": "sk-test-dokploy-ai",
+        "coder-workspace-issuer": "sk-test-coder-workspace-issuer",
     }
 
 
@@ -329,7 +346,7 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
     flat_env = _qa_flat_env()
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=flat_env, plan=plan)
     manager = LiteLLMGatewayManager(api=FakeLiteLLMAdminApi(), sleep_fn=lambda _: None)
@@ -341,8 +358,8 @@ def _build_fake_harness() -> FakeLiteLLMRestrictionHarness:
         flat_env,
         {
             "opencode_go_api_key_env": "OPENCODE_GO_API_KEY",
-            "openrouter_api_key_env": "MY_FARM_ADVISOR_OPENROUTER_API_KEY",
-            "nvidia_api_key_env": "OPENCLAW_NVIDIA_API_KEY",
+            "openrouter_api_key_env": "LITELLM_OPENROUTER_API_KEY",
+            "nvidia_api_key_env": "LITELLM_NVIDIA_API_KEY",
             "openrouter_model_metadata": {
                 "anthropic/claude-3.5-sonnet": {
                     "pricing": {
@@ -368,11 +385,11 @@ def _consumer_api_key(consumer: str) -> str:
     return _expected_consumer_keys()[consumer]
 
 
-def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
+def test_dokploy_ai_reconciles_with_shared_visible_aliases() -> None:
     flat_env = _qa_flat_env()
     plan = build_shared_core_plan(
         stack_name="wizard-stack",
-        enabled_packs=("coder", "my-farm-advisor", "openclaw"),
+        enabled_packs=("coder",),
     )
     allowlists = build_litellm_consumer_model_allowlists(flat_env=flat_env, plan=plan)
     manager = LiteLLMGatewayManager(api=FakeLiteLLMAdminApi(), sleep_fn=lambda _: None)
@@ -382,12 +399,18 @@ def test_dokploy_ai_reconciles_with_default_model_alias_only() -> None:
         consumer_model_allowlists=allowlists,
     )
 
-    assert allowlists["dokploy-ai"] == (DEFAULT_LOCAL_CANONICAL_ALIAS,)
+    assert allowlists["dokploy-ai"] == (
+        DEFAULT_LOCAL_CANONICAL_ALIAS,
+        "openrouter/anthropic/claude-3.5-sonnet",
+    )
     assert reconciled["dokploy-ai"] == LiteLLMVirtualKeyRecord(
         key="sk-test-dokploy-ai",
         key_alias="dokploy-ai",
         team_id="team-dokploy-ai",
-        models=(DEFAULT_LOCAL_CANONICAL_ALIAS,),
+        models=(
+            DEFAULT_LOCAL_CANONICAL_ALIAS,
+            "openrouter/anthropic/claude-3.5-sonnet",
+        ),
         metadata={"consumer": "dokploy-ai", "managed_by": "dokploy-wizard"},
     )
 
@@ -492,13 +515,13 @@ def fake_harness() -> FakeLiteLLMRestrictionHarness:
     return _build_fake_harness()
 
 
-def test_fake_v1_models_farm_key_shows_local_and_opencode_go_wildcard(
+def test_fake_v1_models_coder_key_shows_expected_aliases_and_no_wildcard(
     fake_harness: FakeLiteLLMRestrictionHarness,
 ) -> None:
-    response = fake_harness.v1_models(_consumer_api_key("my-farm-advisor"))
+    response = fake_harness.v1_models(_consumer_api_key("coder-hermes"))
 
     assert response.status_code == 200
-    assert _model_names_from_v1_models(response) == EXPECTED_VISIBLE_MODELS["my-farm-advisor"]
+    assert _model_names_from_v1_models(response) == EXPECTED_VISIBLE_MODELS["coder-hermes"]
     assert "openrouter/*" not in _model_names_from_v1_models(response)
 
 
@@ -532,7 +555,7 @@ def test_fake_model_info_matches_expected_aliases_only(
     assert _model_names_from_model_info(response) == expected_models
 
 
-@pytest.mark.parametrize("consumer", tuple(EXPECTED_VISIBLE_MODELS))
+@pytest.mark.parametrize("consumer", SHARED_ALIAS_CONSUMERS)
 def test_fake_model_info_preserves_cost_metadata_where_available(
     fake_harness: FakeLiteLLMRestrictionHarness,
     consumer: str,
@@ -544,6 +567,19 @@ def test_fake_model_info_preserves_cost_metadata_where_available(
         response,
         required_costs_by_model=EXPECTED_MODEL_INFO_COSTS,
     )
+    local_model_info = _model_info_entries_by_name(response)[DEFAULT_LOCAL_CANONICAL_ALIAS]["model_info"]
+    assert isinstance(local_model_info, dict)
+    assert "input_cost_per_token" not in local_model_info
+    assert "output_cost_per_token" not in local_model_info
+
+
+def test_fake_model_info_dokploy_ai_key_exposes_local_entry_without_costs(
+    fake_harness: FakeLiteLLMRestrictionHarness,
+) -> None:
+    response = fake_harness.model_info(_consumer_api_key("dokploy-ai"))
+
+    assert response.status_code == 200
+    assert _model_names_from_model_info(response) == EXPECTED_VISIBLE_MODELS["dokploy-ai"]
     local_model_info = _model_info_entries_by_name(response)[DEFAULT_LOCAL_CANONICAL_ALIAS]["model_info"]
     assert isinstance(local_model_info, dict)
     assert "input_cost_per_token" not in local_model_info
@@ -568,10 +604,8 @@ def test_fake_opencode_go_wildcard_is_isolated_to_intended_alias_policy(
     }
 
     assert visible_wildcards == {
-        "my-farm-advisor": (),
-        "openclaw": (),
         "coder-hermes": (),
-        "coder-kdense": (),
+        "dokploy-ai": (),
     }
 
 

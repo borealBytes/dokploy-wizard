@@ -188,11 +188,13 @@ def reconcile_seaweedfs(
             data_resource_id=None,
         )
 
-    hostname = desired_state.hostnames.get("s3")
-    if hostname is None:
-        raise SeaweedFsError(
-            "Desired state is missing the canonical SeaweedFS hostname at hostnames['s3']."
-        )
+    # The public s3 hostname was de-exposed: the gateway is anonymous by
+    # default and an open bucket on the internet is an invitation. The S3 API
+    # now rides an internal-only route; stacks migrating from the public
+    # hostname keep the DNS/tunnel cleanup to the networking phase's prune.
+    hostname = desired_state.hostnames.get("s3") or internal_s3_hostname(
+        desired_state.stack_name
+    )
     credentials = _credentials_from_desired_or_backend(desired_state, backend)
     if credentials is None:
         raise SeaweedFsError(
@@ -530,6 +532,12 @@ def _find_owned_resource(
 
 def _service_name(stack_name: str) -> str:
     return f"{stack_name}-seaweedfs"
+
+
+def internal_s3_hostname(stack_name: str) -> str:
+    """The cluster-internal S3 route hostname (never published publicly)."""
+
+    return f"{stack_name}-s3.internal"
 
 
 def _data_name(stack_name: str) -> str:

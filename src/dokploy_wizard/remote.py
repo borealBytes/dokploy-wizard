@@ -58,6 +58,67 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_remote_common_arguments(modify_parser)
     _add_fresh_arguments(modify_parser)
+    modify_parser.add_argument(
+        "--force-phase",
+        choices=(
+            "networking",
+            "shared_core",
+            "seaweedfs",
+            "headscale",
+            "tailscale",
+            "matrix",
+            "moodle",
+            "docuseal",
+            "filex",
+            "gitea",
+            "coder",
+            "cloudflare_access",
+        ),
+        help="forward --force-phase to the remote modify run (re-apply one converged phase)",
+    )
+
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help="run upgrade against a remote host",
+        description=(
+            "Upload the repo and run upgrade remotely. --check reports image drift only. "
+            "Applying a --litellm tag bump runs non-interactively and requires --confirm-file. "
+            "Defaults: --user root, --remote-path /root/dokploy-wizard, --env-file .install.env."
+        ),
+    )
+    _add_remote_common_arguments(upgrade_parser)
+    upgrade_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="print the remote drift report without snapshot or apply",
+    )
+    upgrade_parser.add_argument(
+        "--litellm",
+        metavar="TAG",
+        help="apply this LiteLLM image tag as the new state-backed pin",
+    )
+    upgrade_parser.add_argument(
+        "--allow-major",
+        action="store_true",
+        help="permit a LiteLLM major-version change (bump or downgrade)",
+    )
+    upgrade_parser.add_argument(
+        "--confirm-file",
+        type=Path,
+        help="path to a typed confirmation file used for the remote apply step",
+    )
+
+    sync_identities_parser = subparsers.add_parser(
+        "sync-identities",
+        help="run identity reconciliation remotely",
+        description=(
+            "Upload the repo and reconcile FileX/Gitea/LiteLLM accounts against the live "
+            "Coder roster remotely. Same lanes as the coder phase; also what the host "
+            "identity timer runs every few minutes. Defaults: --user root, --remote-path "
+            "/root/dokploy-wizard, --env-file .install.env."
+        ),
+    )
+    _add_remote_common_arguments(sync_identities_parser)
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -123,8 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.epilog = (
-        "Lifecycle commands: install, modify, uninstall, inspect-state, proof. "
-        "Remote defaults: /root/dokploy-wizard and .install.env."
+        "Lifecycle commands: install, modify, uninstall, upgrade, inspect-state, proof, "
+        "sync-identities. Remote defaults: /root/dokploy-wizard and .install.env."
     )
     return parser
 
@@ -144,7 +205,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     reporter.progress(f"starting remote {args.command}")
 
     try:
-        if args.command in {"install", "modify", "uninstall", "proof"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "upgrade",
+            "proof",
+            "sync-identities",
+        }:
             _require_local_env_file(args.env_file)
     except (OSError, ValueError) as error:
         print(_redact_runtime_message(str(error), password=args.password), file=sys.stderr)
@@ -179,7 +247,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     exit_code = 1
 
     try:
-        if args.command in {"install", "modify", "uninstall", "proof"}:
+        if args.command in {
+            "install",
+            "modify",
+            "uninstall",
+            "upgrade",
+            "proof",
+            "sync-identities",
+        }:
             _upload_remote_bundle(args=args, session=session, reporter=reporter)
             _extract_remote_bundle(session=session, password=args.password)
         if args.command == "install":
@@ -235,7 +310,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run_remote_command(
                 session=session,
                 subcommand="modify",
-                command=_build_modify_command(session),
+                command=_build_modify_command(session, force_phase=args.force_phase),
+                password=args.password,
+            )
+            exit_code = 0
+            return exit_code
+        if args.command == "sync-identities":
+            _run_remote_command(
+                session=session,
+                subcommand="sync-identities",
+                command=_build_sync_identities_command(session),
                 password=args.password,
             )
             exit_code = 0
@@ -263,6 +347,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 session=session,
                 subcommand="inspect-state",
                 command=_build_inspect_state_command(session),
+                password=args.password,
+            )
+            exit_code = 0
+            return exit_code
+        if args.command == "upgrade":
+            upgrade_confirm_path: str | None = (
+                _upload_confirm_file(
+                    session=session,
+                    confirm_file=args.confirm_file,
+                    reporter=reporter,
+                )
+                if args.litellm is not None and not args.check
+                else None
+            )
+            _run_remote_command(
+                session=session,
+                subcommand="upgrade",
+                command=_build_upgrade_command(
+                    session,
+                    check=args.check,
+                    litellm_tag=args.litellm,
+                    allow_major=args.allow_major,
+                    remote_confirm_path=upgrade_confirm_path,
+                ),
                 password=args.password,
             )
             exit_code = 0
@@ -371,6 +479,17 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         if getattr(args, "confirm_file", None) is None:
             parser.error(
                 "uninstall requires --confirm-file for non-interactive remote confirmation."
+            )
+    if (
+        command == "upgrade"
+        and getattr(args, "litellm", None) is not None
+        and not getattr(args, "check", False)
+    ):
+        # --check never applies anything, so a read-only drift run must not
+        # demand the apply-time confirm file.
+        if getattr(args, "confirm_file", None) is None:
+            parser.error(
+                "upgrade --litellm runs non-interactively and requires --confirm-file."
             )
 
 
@@ -540,17 +659,35 @@ def _build_install_command(session: RemoteTransportSession) -> str:
     )
 
 
-def _build_modify_command(session: RemoteTransportSession) -> str:
+def _build_modify_command(
+    session: RemoteTransportSession,
+    *,
+    force_phase: str | None = None,
+) -> str:
+    command = [
+        "./bin/dokploy-wizard",
+        "modify",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+        "--non-interactive",
+    ]
+    if force_phase is not None:
+        command.extend(["--force-phase", force_phase])
+    return _with_unbuffered_python(_shell_join(command))
+
+
+def _build_sync_identities_command(session: RemoteTransportSession) -> str:
     return _with_unbuffered_python(
         _shell_join(
             [
                 "./bin/dokploy-wizard",
-                "modify",
+                "sync-identities",
                 "--env-file",
                 session.remote_install_env_path,
                 "--state-dir",
                 session.remote_state_dir,
-                "--non-interactive",
             ]
         )
     )
@@ -590,6 +727,34 @@ def _build_inspect_state_command(session: RemoteTransportSession) -> str:
     )
 
 
+def _build_upgrade_command(
+    session: RemoteTransportSession,
+    *,
+    check: bool,
+    litellm_tag: str | None,
+    allow_major: bool,
+    remote_confirm_path: str | None,
+) -> str:
+    command = [
+        "./bin/dokploy-wizard",
+        "upgrade",
+        "--env-file",
+        session.remote_install_env_path,
+        "--state-dir",
+        session.remote_state_dir,
+        "--non-interactive",
+    ]
+    if check:
+        command.append("--check")
+    if litellm_tag is not None:
+        command.extend(["--litellm", litellm_tag])
+    if allow_major:
+        command.append("--allow-major")
+    if remote_confirm_path is not None:
+        command.extend(["--confirm-file", remote_confirm_path])
+    return _with_unbuffered_python(_shell_join(command))
+
+
 def _run_remote_command(
     *,
     session: RemoteTransportSession,
@@ -604,9 +769,12 @@ def _resolve_expected_service_url_links(env_file: Path) -> tuple[tuple[str, str]
     desired_state = resolve_desired_state(parse_env_file(env_file))
     links: list[tuple[str, str]] = [("Dokploy", _user_facing_url(desired_state.dokploy_url))]
     for hostname_key, label in (
-        ("nextcloud", "Nextcloud"),
         ("coder", "Coder"),
-        ("my-farm-advisor", "My Farm Advisor/Farm"),
+        ("docuseal", "DocuSeal"),
+        ("filex", "FileX"),
+        ("onlyoffice", "ONLYOFFICE"),
+        ("gitea", "Gitea"),
+        ("moodle", "Moodle"),
     ):
         hostname = desired_state.hostnames.get(hostname_key)
         if hostname:

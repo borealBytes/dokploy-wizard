@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import http.client
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -22,6 +22,11 @@ from dokploy_wizard.state.models import DesiredState, OwnedResource, OwnershipLe
 
 CODER_SERVICE_RESOURCE_TYPE = "coder_service"
 CODER_DATA_RESOURCE_TYPE = "coder_data"
+# The coder phase installs one host-level systemd pair so identity lanes re-run
+# without another wizard pass (see `_install_identity_timer` in dokploy/coder.py).
+# It is ledger-owned like everything else: uninstall must take it back down.
+CODER_IDENTITY_TIMER_RESOURCE_TYPE = "coder_identity_timer"
+CODER_IDENTITY_TIMER_UNIT = "dokploy-wizard-identity.timer"
 
 
 class CoderError(RuntimeError):
@@ -66,11 +71,27 @@ class CoderBackend(Protocol):
 
     def ensure_application_ready(self) -> tuple[str, ...]: ...
 
+    @property
+    def apply_time_owned_resources(self) -> tuple[OwnedResource, ...]:
+        """Host resources the most recent apply installed.
+
+        The engine harvests this into `build_coder_ledger(extra_resources=...)`
+        because mid-apply ledger writes are clobbered by the rebuild; the
+        ledger merge keeps prior timer rows when a pass reports nothing (a
+        non-root pass or failed unit write still leaves the units standing).
+        Implementations must answer this before any apply has run.
+        """
+        ...
+
 
 class ShellCoderBackend:
     def __init__(self) -> None:
         self._service: CoderResourceRecord | None = None
         self._data: CoderResourceRecord | None = None
+        # Protocol member: the shell backend installs no host units, and a
+        # pass that reports nothing must read as "nothing new owned", never
+        # as a missing attribute.
+        self.apply_time_owned_resources: tuple[OwnedResource, ...] = ()
 
     def get_service(self, resource_id: str) -> CoderResourceRecord | None:
         if self._service is not None and self._service.resource_id == resource_id:
@@ -283,7 +304,13 @@ def build_coder_ledger(
     stack_name: str,
     service_resource_id: str | None,
     data_resource_id: str | None,
+    extra_resources: Sequence[OwnedResource] = (),
 ) -> OwnershipLedger:
+    timer_scopes = {
+        resource.scope
+        for resource in extra_resources
+        if resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
+    }
     resources = [
         resource
         for resource in existing_ledger.resources
@@ -296,8 +323,22 @@ def build_coder_ledger(
                 resource.resource_type == CODER_DATA_RESOURCE_TYPE
                 and resource.scope == _data_scope(stack_name)
             )
+            or (
+                resource.resource_type == CODER_IDENTITY_TIMER_RESOURCE_TYPE
+                and resource.scope in timer_scopes
+            )
         )
     ]
+    # Extra resources ride the apply itself (the identity timer units are
+    # installed from inside `ensure_application_ready`). The timer strip above
+    # is deliberately narrow: it only replaces rows for scopes this pass
+    # re-asserted, because a pass that could not report (non-root, a failed
+    # unit write, the coder phase skipped) leaves the units standing on disk —
+    # dropping their row there would strand an enabled timer that uninstall
+    # can no longer name. The narrow strip keeps the re-add idempotent across
+    # reruns of a stack that does report.
+    for resource in extra_resources:
+        resources.append(resource)
     if service_resource_id is not None:
         resources.append(
             OwnedResource(
@@ -523,6 +564,19 @@ def _service_scope(stack_name: str) -> str:
 
 def _data_scope(stack_name: str) -> str:
     return f"stack:{stack_name}:coder:data"
+
+
+def coder_identity_timer_resource(stack_name: str) -> OwnedResource:
+    """The ledger row for the coder phase's identity timer unit pair.
+
+    One source for the type/id/scope triple so the backend claim, the ledger
+    rebuild, the uninstall rule, and the executor branch can never drift apart.
+    """
+    return OwnedResource(
+        resource_type=CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+        resource_id=CODER_IDENTITY_TIMER_UNIT,
+        scope=_service_scope(stack_name),
+    )
 
 
 def _http_health_check(url: str) -> bool:

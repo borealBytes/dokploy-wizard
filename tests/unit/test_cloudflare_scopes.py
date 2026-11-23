@@ -80,6 +80,7 @@ class FakeCloudflareBackend:
     certificate_scope_ok: bool = True
     ordered_certificate_hosts: list[tuple[str, ...]] = field(default_factory=list)
     dns_record_updates: list[tuple[str, str, str, str, bool]] = field(default_factory=list)
+    dns_deletions: list[tuple[str, str]] = field(default_factory=list)
 
     def validate_account_access(self, account_id: str) -> None:
         if not self.account_ok:
@@ -152,6 +153,16 @@ class FakeCloudflareBackend:
             proxied=proxied,
         )
 
+    def delete_dns_record(self, zone_id: str, *, record_id: str) -> None:
+        self.dns_deletions.append((zone_id, record_id))
+        for hostname, records in list(self.dns_records.items()):
+            remaining = tuple(r for r in records if r.record_id != record_id)
+            if len(remaining) != len(records):
+                if remaining:
+                    self.dns_records[hostname] = remaining
+                else:
+                    del self.dns_records[hostname]
+
     def update_dns_record(
         self,
         zone_id: str,
@@ -171,6 +182,12 @@ class FakeCloudflareBackend:
         )
         self.dns_records[hostname] = (updated_record,)
         return updated_record
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
 
     def list_certificate_packs(self, zone_id: str) -> tuple[CloudflareCertificatePack, ...]:
         if not self.certificate_scope_ok:
@@ -279,6 +296,17 @@ class FakeCloudflareBackend:
         )
         self.access_policies[app_id] = policy
         return policy
+
+    def delete_access_application(self, account_id: str, app_id: str) -> None:
+        del account_id
+        for domain, app in list(self.access_apps.items()):
+            if app.app_id == app_id:
+                del self.access_apps[domain]
+                self.access_policies.pop(app_id, None)
+
+    def delete_access_policy(self, account_id: str, app_id: str, policy_id: str) -> None:
+        del account_id, policy_id
+        self.access_policies.pop(app_id, None)
 
 
 def test_networking_rejects_zone_scope_before_planning_dns() -> None:
@@ -725,8 +753,8 @@ def test_networking_retargets_stale_enabled_service_tunnel_cname() -> None:
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_MY_FARM_ADVISOR": "true",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-key",
+                "ENABLE_MOODLE": "true",
+                "MOODLE_SUBDOMAIN": "farm",
             },
         )
     )
@@ -1000,16 +1028,15 @@ def test_networking_fails_when_nested_coder_wildcard_needs_ssl_scope() -> None:
         )
 
 
-def test_access_only_targets_advisor_hostnames() -> None:
+def test_access_only_targets_the_litellm_admin_hostname() -> None:
     desired = resolve_desired_state(
         RawEnvInput(
             format_version=1,
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_OPENCLAW": "true",
-                "ENABLE_MY_FARM_ADVISOR": "true",
-                "MY_FARM_ADVISOR_OPENROUTER_API_KEY": "farm-openrouter-key",
+                "ENABLE_MOODLE": "true",
+                "ENABLE_CODER": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com,ops@example.com",
             },
         )
@@ -1025,13 +1052,16 @@ def test_access_only_targets_advisor_hostnames() -> None:
     )
 
     assert phase.result.outcome == "plan_only"
-    assert [item.hostname for item in phase.result.applications] == [
-        "openclaw.example.com",
-        "farm.example.com",
-        "litellm.example.com",
-    ]
+    assert [item.hostname for item in phase.result.applications] == ["litellm.example.com"]
     assert all(
-        hostname not in {"dokploy.example.com", "headscale.example.com", "matrix.example.com"}
+        hostname
+        not in {
+            "dokploy.example.com",
+            "headscale.example.com",
+            "matrix.example.com",
+            "moodle.example.com",
+            "coder.example.com",
+        }
         for hostname in [item.hostname for item in phase.result.applications]
     )
 
@@ -1043,7 +1073,7 @@ def test_access_rerun_reuses_owned_resources() -> None:
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_OPENCLAW": "true",
+                "ENABLE_MOODLE": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
             },
         )
@@ -1055,13 +1085,6 @@ def test_access_rerun_reuses_owned_resources() -> None:
             provider_type="onetimepin",
         ),
         access_apps={
-            "openclaw.example.com": CloudflareAccessApplication(
-                app_id="app-openclaw",
-                name="openclaw.example.com protected",
-                domain="openclaw.example.com",
-                app_type="self_hosted",
-                allowed_identity_provider_ids=("otp-provider-1",),
-            ),
             "litellm.example.com": CloudflareAccessApplication(
                 app_id="app-litellm",
                 name="LiteLLM Admin protected",
@@ -1071,13 +1094,6 @@ def test_access_rerun_reuses_owned_resources() -> None:
             )
         },
         access_policies={
-            "app-openclaw": CloudflareAccessPolicy(
-                policy_id="policy-openclaw",
-                app_id="app-openclaw",
-                name="Allow openclaw.example.com",
-                decision="allow",
-                emails=("owner@example.com",),
-            ),
             "app-litellm": CloudflareAccessPolicy(
                 policy_id="policy-litellm",
                 app_id="app-litellm",
@@ -1099,16 +1115,6 @@ def test_access_rerun_reuses_owned_resources() -> None:
                     resource_type="cloudflare_access_otp_provider",
                     resource_id="otp-provider-1",
                     scope="account:account-123:access-otp-provider",
-                ),
-                OwnedResource(
-                    resource_type="cloudflare_access_application",
-                    resource_id="app-openclaw",
-                    scope="account:account-123:access-app:openclaw.example.com",
-                ),
-                OwnedResource(
-                    resource_type="cloudflare_access_policy",
-                    resource_id="policy-openclaw",
-                    scope="account:account-123:access-policy:openclaw.example.com",
                 ),
                 OwnedResource(
                     resource_type="cloudflare_access_application",
@@ -1148,7 +1154,7 @@ def test_cloudflare_policy_list_parsing_uses_caller_app_id_when_missing(
                     "exclude": [],
                     "id": "policy-123",
                     "include": [{"email": {"email": "Admin@Example.com"}}],
-                    "name": "Allow openclaw.example.com",
+                    "name": "Allow litellm.example.com",
                     "precedence": 1,
                     "require": [],
                     "reusable": False,
@@ -1160,12 +1166,12 @@ def test_cloudflare_policy_list_parsing_uses_caller_app_id_when_missing(
     )
 
     policy = backend.find_access_policy_by_name(
-        "account-123", "app-openclaw", "Allow openclaw.example.com"
+        "account-123", "app-litellm", "Allow litellm.example.com"
     )
 
     assert policy is not None
     assert policy.policy_id == "policy-123"
-    assert policy.app_id == "app-openclaw"
+    assert policy.app_id == "app-litellm"
     assert policy.emails == ("admin@example.com",)
 
 
@@ -1247,11 +1253,6 @@ def _desired_state() -> DesiredState:
         },
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
-        openclaw_gateway_token=None,
-        openclaw_channels=(),
-        openclaw_replicas=None,
-        my_farm_advisor_channels=(),
-        my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan("wizard-stack", ()),
     )
 
@@ -1289,7 +1290,7 @@ def test_access_phase_reuses_the_builtin_provider_and_names_it_for_operators() -
             values={
                 "STACK_NAME": "wizard-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_OPENCLAW": "true",
+                "ENABLE_MOODLE": "true",
                 "CLOUDFLARE_ACCESS_OTP_EMAILS": "owner@example.com",
             },
         )
@@ -1317,7 +1318,10 @@ def test_access_phase_reuses_the_builtin_provider_and_names_it_for_operators() -
     assert phase.result.otp_provider.name == "One-time PIN login"
 
 
-def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_openclaw() -> None:
+def test_resolve_desired_state_keeps_access_opt_in_without_explicit_emails() -> None:
+    # Access OTP is opt-in: every shipped surface already has its own login, so
+    # an unset recipient list stays empty even when the admin hostname exists.
+    # Listing an email is what turns the phase on.
     desired_state = resolve_desired_state(
         RawEnvInput(
             format_version=1,
@@ -1325,9 +1329,23 @@ def test_resolve_desired_state_defaults_access_email_to_dokploy_admin_for_opencl
                 "STACK_NAME": "openmerge",
                 "ROOT_DOMAIN": "openmerge.me",
                 "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
-                "ENABLE_OPENCLAW": "true",
+                "LITELLM_ADMIN_SUBDOMAIN": "litellm",
             },
         )
     )
 
-    assert desired_state.cloudflare_access_otp_emails == ("admin@example.com",)
+    assert desired_state.cloudflare_access_otp_emails == ()
+
+    opted_in = resolve_desired_state(
+        RawEnvInput(
+            format_version=1,
+            values={
+                "STACK_NAME": "openmerge",
+                "ROOT_DOMAIN": "openmerge.me",
+                "DOKPLOY_ADMIN_EMAIL": "admin@example.com",
+                "CLOUDFLARE_ACCESS_OTP_EMAILS": "admin@example.com",
+            },
+        )
+    )
+
+    assert opted_in.cloudflare_access_otp_emails == ("admin@example.com",)

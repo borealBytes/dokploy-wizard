@@ -66,7 +66,7 @@ resource "coder_agent" "main" {
     fi
 
     $_SUDO apt-get update -q
-    $_SUDO apt-get install -y curl git ca-certificates wget btop python3
+    $_SUDO apt-get install -y curl git ca-certificates wget btop python3 fuse3
 
     # OpenCode, skip if already installed
     if ! command -v opencode >/dev/null 2>&1; then
@@ -141,8 +141,928 @@ resource "coder_agent" "main" {
     export HERMES_TEMPLATE_BASE_URL="__DOKPLOY_WIZARD_HERMES_BASE_URL__"
     export HERMES_TEMPLATE_API_KEY="__DOKPLOY_WIZARD_HERMES_API_KEY__"
     export HERMES_TEMPLATE_API_KEY_PLACEHOLDER="__DOKPLOY_WIZARD_HERMES_API_KEY_PLACEHOLDER__"
+    # -- wizard: per-workspace LiteLLM identity --------------------------------
+    # The baked template key is shared by every workspace. When the wizard
+    # provided an issuer key, this workspace mints its own virtual key named
+    # coder-<login>-<workspace> and owned by the person's gateway user: spend
+    # attributes per person and machine, and rotating one workspace's key
+    # touches no other. The pair is the honest
+    # identity — Coder workspace names are unique only PER OWNER, so a bare
+    # workspace name let a second owner's "dev" adopt the first owner's key.
+    # The token derives from issuer + that label, so restarts adopt the same
+    # key and an issuer rotation re-mints for free. Any failure falls back to
+    # the baked shared key: a workspace without a personal key still starts
+    # with AI.
+    DOKPLOY_WIZARD_LITELLM_ISSUER_KEY="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY__"
+    # The sentinel is deliberately NOT in the wizard's replacement map (the same
+    # trick the Hermes wiring above uses): comparing the assignment against a
+    # second copy of the marker would compare the real key to itself after
+    # substitution, fail the guard, and silently skip minting forever.
+    DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL="__DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL__"
+    DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
+    DOKPLOY_WIZARD_ENV_API_KEY_OVERRIDE="$${AI_DEFAULT_API_KEY:-}"
+    if [ -n "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" ] && \
+       [ "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" != \
+         "$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY_SENTINEL" ]; then
+      DOKPLOY_WIZARD_WORKSPACE_API_KEY=$(
+        DOKPLOY_LITELLM_BASE_URL="$HERMES_TEMPLATE_BASE_URL" \
+        DOKPLOY_LITELLM_ISSUER_KEY="$DOKPLOY_WIZARD_LITELLM_ISSUER_KEY" \
+        DOKPLOY_WORKSPACE_NAME="${data.coder_workspace.me.name}" \
+        DOKPLOY_WORKSPACE_OWNER="${data.coder_workspace_owner.me.name}" \
+        DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS__" \
+        DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS="__DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS__" \
+        DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__" \
+        DOKPLOY_WIZARD_LITELLM_DENY_MODEL="__DOKPLOY_WIZARD_LITELLM_DENY_MODEL__" \
+        DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS="__DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS__" \
+        python3 - <<'MINTPY'
+import hashlib, json, os, urllib.error, urllib.request
+
+base = os.environ.get("DOKPLOY_LITELLM_BASE_URL", "").rstrip("/")
+issuer = os.environ.get("DOKPLOY_LITELLM_ISSUER_KEY", "")
+workspace = os.environ.get("DOKPLOY_WORKSPACE_NAME", "")
+owner = os.environ.get("DOKPLOY_WORKSPACE_OWNER", "")
+# Operator model access is opt-in for new users: the wizard bakes the policy
+# (ALLOW_LITELLM_MODELS_FOR_NEW_USERS + ALLOWED_LITELLM_ADDITIONAL_USERS + the
+# seeded admin login, always exempt) and a denied owner mints a key scoped to
+# the deny model instead of the operator's models. Boot stays healthy, spend
+# stays attributed, and inference fails honestly at the gateway — rather than
+# the no-key fallback handing the workspace the shared baked key, which would
+# bypass the policy entirely. The shared-core reconcile sweep re-scopes
+# existing keys the same way when the policy flips — and migrates their alias
+# and owner attribution in place — so no reboot is needed.
+# The grant itself is the wizard's named access group (baked from
+# WORKSPACE_KEY_GRANTED_MODELS, single source): the group carries every synced
+# model, so autosync re-grants new models to standing keys without a re-mint.
+granted_models = [
+    item.strip()
+    for item in os.environ.get("DOKPLOY_WIZARD_LITELLM_GRANTED_MODELS", "").split(",")
+    if item.strip()
+]
+if any(item.startswith("__DOKPLOY_WIZARD") for item in granted_models):
+    # Unmapped marker (pre-group template build): keep the legacy grant.
+    granted_models = ["sync/*", "sync/default-chat"]
+allow_new_users = os.environ.get("DOKPLOY_WIZARD_LITELLM_ALLOW_NEW_USERS", "") == "true"
+allowed_users = {
+    item.strip().lower()
+    for item in os.environ.get("DOKPLOY_WIZARD_LITELLM_ALLOWED_USERS", "").split(",")
+    if item.strip()
+}
+admin_login = os.environ.get("DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN", "").strip().lower()
+deny_model = os.environ.get("DOKPLOY_WIZARD_LITELLM_DENY_MODEL", "").strip()
+if (
+    allow_new_users
+    or owner.lower() in allowed_users
+    or (admin_login and owner.lower() == admin_login)
+):
+    models = granted_models
+elif deny_model:
+    models = [deny_model]
+else:
+    # Unmapped marker (pre-policy template build): keep the legacy grant.
+    models = granted_models
+if base and issuer and workspace and owner:
+    label = owner + "-" + workspace
+    token = "sk-" + hashlib.sha256((issuer + ":" + label).encode()).hexdigest()[:40]
+
+    def mint_request(method, path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            base + path,
+            method=method,
+            data=data,
+            headers={"Authorization": "Bearer " + issuer, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                try:
+                    return resp.status, json.loads(resp.read().decode())
+                except Exception:
+                    return resp.status, None
+        except urllib.error.HTTPError as exc:
+            return exc.code, None
+        except Exception:
+            return 0, None
+
+    def mint_generate():
+        mint_request(
+            "POST",
+            "/key/generate",
+            {
+                "key": token,
+                "key_alias": "coder-" + label,
+                "user_id": owner,
+                "models": models,
+                "metadata": {
+                    "managed_by": "dokploy-wizard",
+                    "coder_workspace": workspace,
+                    "coder_owner": owner,
+                },
+            },
+        )
+
+    def minted_fields(info):
+        # /key/info exposes the grant flat or nested under "info" depending on
+        # the LiteLLM build; absence means unknown, not mismatched — the
+        # admin-side sweep is what enforces policy without a reboot anyway.
+        # The alias and owner reads follow the same unknown-then-spare rule: a
+        # build that hides a field never triggers a retire on that field.
+        holders = [info]
+        if isinstance(info, dict) and isinstance(info.get("info"), dict):
+            holders.append(info["info"])
+        models = alias = user = None
+        for holder in holders:
+            if not isinstance(holder, dict):
+                continue
+            if models is None and isinstance(holder.get("models"), list):
+                models = sorted(str(item) for item in holder["models"])
+            if alias is None and holder.get("key_alias"):
+                alias = str(holder["key_alias"])
+            if user is None and holder.get("user_id"):
+                user = str(holder["user_id"])
+        return models, alias, user
+
+    # info-then-generate: a previous boot (or a recreate under the same
+    # workspace identity) already owns this deterministic token; adopt it
+    # rather than collide. When the policy moved since the key was minted —
+    # or the key predates the coder- alias / owner attribution — retire and
+    # re-mint under the same deterministic token (spend attribution survives
+    # the swap). The final re-info is what decides: if minting was refused
+    # for any reason the fallback below keeps the baked shared key.
+    expected_alias = "coder-" + label
+    status, info = mint_request("GET", "/key/info?key=" + token)
+    if status != 200:
+        mint_generate()
+    else:
+        current_models, current_alias, current_user = minted_fields(info)
+        drifted = (
+            (
+                current_models is not None
+                and current_models != sorted(str(item) for item in models)
+            )
+            or (current_alias is not None and current_alias != expected_alias)
+            or (current_user is not None and current_user != owner)
+        )
+        if drifted:
+            mint_request("POST", "/key/delete", {"keys": [token]})
+            mint_generate()
+    if mint_request("GET", "/key/info?key=" + token)[0] == 200:
+        # Upgrade cleanup: pre owner-scoping, the token derived from issuer +
+        # bare workspace name. That key is deterministic too, so retire it
+        # once the new one stands — otherwise the sweep's workspace-key spare
+        # strands it forever (nothing would ever mint or delete it again).
+        old_token = "sk-" + hashlib.sha256((issuer + ":" + workspace).encode()).hexdigest()[:40]
+        if old_token != token and mint_request("GET", "/key/info?key=" + old_token)[0] == 200:
+            mint_request("POST", "/key/delete", {"keys": [old_token]})
+        print(token)
+MINTPY
+      ) || DOKPLOY_WIZARD_WORKSPACE_API_KEY=""
+    fi
+    if [ -n "$DOKPLOY_WIZARD_WORKSPACE_API_KEY" ]; then
+      export HERMES_TEMPLATE_API_KEY="$DOKPLOY_WIZARD_WORKSPACE_API_KEY"
+    fi
     export DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON="__DOKPLOY_WIZARD_LITELLM_FALLBACK_MODELS_JSON__"
     export HERMES_PUBLIC_ORIGIN="__DOKPLOY_WIZARD_CODER_PUBLIC_ORIGIN__"
+
+    # -- wizard: ~/shared (FileX team folder) ---------------------------------
+    # The FileX bucket rides into every workspace as a live folder at ~/shared:
+    # an rclone FUSE mount over FileX's own S3 door with a disk-backed hot
+    # cache. Names are always visible, content arrives on first open, idle
+    # files are evicted — a window onto the bucket, never a full clone. Each
+    # workspace mints its own S3 key labeled <login>-<workspace>, so every
+    # write names a person and a machine: file rows record the key's owner,
+    # overwrites snapshot into FileX's version catalogue, and the label ties
+    # the write to one workspace. The account IS the person — their real
+    # Coder email, springing at first boot if they have no FileX account yet
+    # (the deployer's does exist: the pack's admin bootstrap, which the lane
+    # then adopts rather than duplicating) — and a manual account owning the
+    # login name under a different email keeps its own secret and its own
+    # meaning (the mount then skips, never resets). Every
+    # workspace, the admin's included, rides these same rules. Nothing in the
+    # setup can take a workspace down: the whole thing runs in the background,
+    # every failure logs and exits, and ~/shared simply stays a plain folder.
+    DOKPLOY_WIZARD_FILEX_URL="__DOKPLOY_WIZARD_FILEX_INTERNAL_URL__"
+    # The *_SENTINEL__ markers are deliberately absent from the wizard's
+    # replacement map (same trick as the issuer guard): a guard comparing
+    # against a second copy of a replaced marker would compare the real value
+    # to itself and skip the mount forever.
+    DOKPLOY_WIZARD_FILEX_URL_SENTINEL="__DOKPLOY_WIZARD_FILEX_INTERNAL_URL_SENTINEL__"
+    DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN__"
+    DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN_SENTINEL__"
+    DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD="__DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD__"
+    if [ -n "$DOKPLOY_WIZARD_FILEX_URL" ] && \
+       [ "$DOKPLOY_WIZARD_FILEX_URL" != "$DOKPLOY_WIZARD_FILEX_URL_SENTINEL" ] && \
+       [ -n "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" ] && \
+       [ "$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN" != \
+         "$DOKPLOY_WIZARD_FILEX_PROVISIONER_SENTINEL" ]; then
+      export DOKPLOY_FX_URL="$DOKPLOY_WIZARD_FILEX_URL"
+      export DOKPLOY_FX_TOKEN="$DOKPLOY_WIZARD_FILEX_PROVISIONER_TOKEN"
+      export DOKPLOY_FX_LOGIN="${data.coder_workspace_owner.me.name}"
+      export DOKPLOY_FX_WORKSPACE="${data.coder_workspace.me.name}"
+      # The account IS the person: email = their real Coder email (the same
+      # identity the pack bootstrapped as the FileX admin for the deployer,
+      # so the deployer's mount rides their own human account, not a twin).
+      # Password = the stack admin password, one operator credential across
+      # the stack (the gitea lane's choice); a boot-time PATCH keeps it true
+      # after rotation. The pre-identity-fix derivation seed is retired.
+      export DOKPLOY_FX_REAL_EMAIL="${data.coder_workspace_owner.me.email}"
+      export DOKPLOY_FX_PASSWORD="$DOKPLOY_WIZARD_FILEX_ACCOUNT_PASSWORD"
+      (
+        # Background on purpose: identity calls and the first rclone download
+        # must never hold the IDE hostage. set -e inside so the first real
+        # failure ends this subshell quietly; the boot does not care.
+        set -e
+        mkdir -p "$HOME/.config/rclone" "$HOME/.config/dokploy" "$HOME/.local/share/dokploy" "$HOME/shared"
+        if ! command -v fusermount3 >/dev/null 2>&1; then
+          # The foreground apt may still be running behind us; retry past the
+          # dpkg lock for a minute before giving the mount up in the log.
+          for _attempt in 1 2 3 4 5 6; do
+            sleep 10
+            command -v fusermount3 >/dev/null 2>&1 && break
+            $_SUDO apt-get -qq -y install fuse3 >/dev/null 2>&1 || true
+          done
+        fi
+        command -v fusermount3 >/dev/null 2>&1 || { echo "shared: no fusermount3; skipping ~/shared"; exit 0; }
+        [ -e /dev/fuse ] || { echo "shared: /dev/fuse not exposed to this workspace; skipping"; exit 0; }
+
+        RCLONE_BIN="$HOME/.local/bin/rclone"
+        if [ ! -x "$RCLONE_BIN" ]; then
+          curl -fsSL -o /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          python3 - "$RCLONE_BIN" <<'RCLONEPY'
+import os
+import stat
+import sys
+import zipfile
+
+dest = sys.argv[1]
+with zipfile.ZipFile("/tmp/rclone.zip") as archive:
+    member = next(n for n in archive.namelist() if n.split("/")[-1] == "rclone")
+    with archive.open(member) as source, open(dest, "wb") as out:
+        out.write(source.read())
+os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+RCLONEPY
+          rm -f /tmp/rclone.zip
+        fi
+
+        python3 - <<'FILEXPROV'
+import json, os, urllib.error, urllib.request
+
+base = os.environ["DOKPLOY_FX_URL"].rstrip("/")
+token = os.environ["DOKPLOY_FX_TOKEN"]
+login = os.environ["DOKPLOY_FX_LOGIN"]
+workspace = os.environ["DOKPLOY_FX_WORKSPACE"]
+password = os.environ["DOKPLOY_FX_PASSWORD"]
+email = os.environ["DOKPLOY_FX_REAL_EMAIL"].strip().lower()
+legacy_email = login + "@coder.wizard.local"  # pre-fix lane value; never minted again
+label = login + "-" + workspace
+env_path = os.path.expanduser("~/.config/dokploy/shared-mount.env")
+
+
+def note(message):
+    print("shared: " + message)
+
+
+def call(method, path, bearer=None, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    if bearer:
+        req.add_header("Authorization", "Bearer " + bearer)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode() or "null")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode() or "null")
+        except Exception:
+            return exc.code, None
+    except Exception:
+        return 0, None
+
+
+def read_env(path):
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    values[key.strip()] = value.strip().strip('"')
+    except FileNotFoundError:
+        pass
+    return values
+
+
+existing = read_env(env_path)
+if not email:
+    note("skipped: no real email for '" + login + "'; ~/shared stays a plain folder")
+    raise SystemExit
+
+# 1) The person's own FileX account, found by their real email, lazily
+#    created through the provisioner when missing. The deployer's email
+#    already IS a FileX account — the admin the pack bootstrapped — so the
+#    deployer's mount rides that human account instead of springing a twin
+#    under a machine email (measured: the pre-fix twin is exactly what
+#    made the account list confusing). A manual account owning the login
+#    name under a different email keeps its own secret and its own meaning:
+#    this lane skips it, never resets it.
+status, users = call("GET", "/api/admin/users", token)
+if status != 200:
+    note("skipped: provisioner token rejected by /api/admin/users (HTTP %s)" % status)
+    raise SystemExit
+rows = users if isinstance(users, list) else (users or {}).get("users", [])
+user = next(
+    (
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("email") or "").lower() == email
+    ),
+    None,
+)
+if user is None:
+    by_name = next(
+        (row for row in rows if isinstance(row, dict) and row.get("username") == login),
+        None,
+    )
+    if by_name is not None:
+        if str(by_name.get("email") or "").lower() == legacy_email:
+            note("skipped: '" + login + "' still rides the pre-fix coder.wizard.local account")
+        else:
+            note("skipped: a manual FileX account owns '" + login + "'")
+        raise SystemExit
+    status, user = call(
+        "POST", "/api/admin/users", token,
+        {"email": email, "username": login, "role": "user", "password": password},
+    )
+    if status not in (200, 201) or not isinstance(user, dict) or "id" not in user:
+        note("skipped: could not create the FileX account (HTTP %s)" % status)
+        raise SystemExit
+    note("created the FileX account for '" + login + "'")
+else:
+    # Adopted account (the deployer's admin included): re-sync the password
+    # to the stack admin password, so one rotation strands neither the mount
+    # nor the web sign-in (admin-route password PATCH measured live).
+    status, _body = call(
+        "PATCH", "/api/admin/users/%s" % user.get("id"), token, {"password": password}
+    )
+    if status == 200:
+        note("synced the FileX password for '" + login + "' to the stack admin password")
+    else:
+        note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
+
+# 2) Sign in as the owner: every credential below belongs to that person, not
+#    to the provisioner — this is where the provisioner's admin power retires.
+status, session = call(
+    "POST", "/api/auth/login",
+    body={"email": email, "password": password},
+)
+if status != 200 or not isinstance(session, dict) or not session.get("token"):
+    note("skipped: FileX sign-in as '" + login + "' refused (password not ours?)")
+    raise SystemExit
+user_jwt = session["token"]
+
+# 3) One S3 key per (user, workspace). The stored secret rides on until it
+#    stops authenticating; then label-match, delete, re-mint (secrets show
+#    once at creation — the env file is their only home).
+status, listed = call("GET", "/api/auth/s3-keys", user_jwt)
+key_rows = (listed or {}).get("keys", []) if isinstance(listed, dict) else []
+access = existing.get("SHARED_ACCESS_KEY_ID")
+secret = existing.get("SHARED_SECRET_ACCESS_KEY")
+adopted = False
+for row in key_rows:
+    if not isinstance(row, dict) or row.get("label") != label:
+        continue
+    if access and row.get("access_key_id") == access:
+        adopted = True
+    else:
+        call("DELETE", "/api/auth/s3-keys/%s" % row.get("id"), user_jwt)
+if not adopted:
+    status, created = call("POST", "/api/auth/s3-keys", user_jwt, {"label": label})
+    payload = created if isinstance(created, dict) else {}
+    key_row = payload.get("key") if isinstance(payload.get("key"), dict) else {}
+    access = key_row.get("access_key_id") or payload.get("access_key_id")
+    secret = payload.get("secret")
+    if not access or not secret:
+        note("skipped: S3 key mint failed (HTTP %s)" % status)
+        raise SystemExit
+    note("minted S3 key '" + label + "'")
+
+# 4) A scoped ai token for the helper commands (/api/ai is token-only by
+#    design; FileX issues read/write/delete/mcp/admin — no narrower "list"
+#    exists, and a restore IS a write, so read+write is the honest floor).
+ai_label = "coder-" + login
+ai_token = existing.get("SHARED_AI_TOKEN")
+ai_alive = False
+if ai_token:
+    ai_alive_status, _ = call("GET", "/api/ai/versions?path=Files%3A%2F%2F", ai_token)
+    ai_alive = ai_alive_status == 200
+if not ai_alive:
+    status, tokens = call("GET", "/api/admin/ai-tokens", token)
+    for row in ((tokens or {}).get("tokens", []) if isinstance(tokens, dict) else []):
+        if isinstance(row, dict) and row.get("label") == ai_label and row.get("user_id") == user.get("id"):
+            call("DELETE", "/api/admin/ai-tokens/%s" % row.get("id"), token)
+    status, minted = call(
+        "POST", "/api/admin/ai-tokens", token,
+        {"label": ai_label, "user_id": user.get("id"), "scopes": "read,write", "kind": "user"},
+    )
+    ai_token = (minted or {}).get("token") if isinstance(minted, dict) else None
+    if not ai_token:
+        note("warning: helper token mint failed (HTTP %s); shared-versions stays offline" % status)
+
+with open(env_path, "w", encoding="utf-8") as handle:
+    handle.write('DOKPLOY_FX_URL="%s"\n' % base)
+    handle.write('SHARED_ACCESS_KEY_ID="%s"\n' % access)
+    handle.write('SHARED_SECRET_ACCESS_KEY="%s"\n' % (secret or ""))
+    handle.write('SHARED_BUCKET="Files"\n')
+    handle.write('SHARED_LABEL="%s"\n' % label)
+    handle.write('SHARED_LOGIN="%s"\n' % login)
+    handle.write('SHARED_PASSWORD="%s"\n' % password)
+    handle.write('SHARED_AI_TOKEN="%s"\n' % (ai_token or ""))
+    handle.write('SHARED_CACHE_SIZE="%s"\n' % (existing.get("SHARED_CACHE_SIZE") or "10G"))
+    handle.write('SHARED_CACHE_AGE="%s"\n' % (existing.get("SHARED_CACHE_AGE") or "48h"))
+os.chmod(env_path, 0o600)
+
+with open(os.path.expanduser("~/.config/rclone/rclone.conf"), "w", encoding="utf-8") as handle:
+    handle.write("[filex]\n")
+    handle.write("type = s3\n")
+    # provider "Other", not "AWS": rclone 1.76's AWS-SDKv2 path computes a
+    # flexible checksum from a seekable body and dies on FileX's door
+    # ("failed to seek body to start") before the PUT is ever sent (measured
+    # live; the flag --s3-disable-checksum does not bypass it). "Other" signs
+    # the plain PUT and the write lands — FileX catalogs it with the key's
+    # owner as the file's owner.
+    handle.write("provider = Other\n")
+    handle.write("endpoint = %s/s3\n" % base)
+    handle.write("env_auth = false\n")
+    handle.write("access_key_id = %s\n" % access)
+    handle.write("secret_access_key = %s\n" % (secret or ""))
+    handle.write("force_path_style = true\n")
+os.chmod(os.path.expanduser("~/.config/rclone/rclone.conf"), 0o600)
+note("ready: ~/shared mounts as '" + label + "'")
+FILEXPROV
+
+        test -f "$HOME/.config/dokploy/shared-mount.env" || exit 0
+
+        cat > "$HOME/.local/bin/filex-shared-supervisor" <<'SUPERVISOR'
+#!/bin/bash
+# dokploy-wizard ~/shared supervisor: keeps the FileX mount alive, and
+# re-reads the env file every cycle so `shared-cache 20G` takes effect on the
+# next remount without restarting anything. flock (held by the launcher) keeps
+# exactly one supervisor per workspace across agent restarts.
+# --allow-non-empty: the mount point lives on the persistent home volume, so
+# anything written while the mount was down (its whole design promise: stay a
+# plain folder, never eat the boot) sits there when the mount returns. FUSE
+# would refuse a non-empty directory by default and retry forever (measured);
+# the flag mounts over the top, shadowing those files until the mount dies.
+umask 022
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+MOUNT_POINT="$HOME/shared"
+mkdir -p "$MOUNT_POINT"
+while :; do
+  if mountpoint -q "$MOUNT_POINT"; then
+    sleep 15
+    continue
+  fi
+  # shellcheck disable=SC1090
+  . "$ENV_FILE" 2>/dev/null || { sleep 30; continue; }
+  "$HOME/.local/bin/rclone" mount "filex:$${SHARED_BUCKET:-Files}" "$MOUNT_POINT" \
+    --config "$HOME/.config/rclone/rclone.conf" \
+    --s3-disable-checksum \
+    --allow-non-empty \
+    --vfs-cache-mode full \
+    --vfs-cache-max-size "$${SHARED_CACHE_SIZE:-10G}" \
+    --vfs-cache-max-age "$${SHARED_CACHE_AGE:-48h}" \
+    --vfs-write-back 5s \
+    --dir-cache-time 1m \
+    --log-file "$HOME/.local/share/dokploy/shared-mount.log" \
+    --log-level NOTICE
+  sleep 5
+done
+SUPERVISOR
+        chmod +x "$HOME/.local/bin/filex-shared-supervisor"
+
+        cat > "$HOME/.local/bin/shared-cache" <<'HELPER'
+#!/bin/bash
+# shared-cache [<size>|--status] — inspect or change the ~/shared hot cache
+# cap (default 10G / 48h idle eviction). The cache holds only what has been
+# touched: raising the cap costs disk, never time. The supervisor picks a new
+# cap up on its next remount; passing a size forces that cycle now.
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+case "$${1:-}" in
+  --status|"")
+    if [ -f "$ENV_FILE" ]; then
+      grep -E '^(SHARED_CACHE_SIZE|SHARED_CACHE_AGE)=' "$ENV_FILE" || true
+      mountpoint -q "$HOME/shared" && echo "mounted: $HOME/shared" || echo "not mounted (remount inside ~20s)"
+      du -sh "$HOME/.cache/rclone" 2>/dev/null | sed 's/^/cache on disk: /'
+    else
+      echo "no ~/shared mount configured"
+    fi
+    ;;
+  *)
+    [ -f "$ENV_FILE" ] || { echo "no ~/shared mount configured"; exit 1; }
+    sed -i "s/^SHARED_CACHE_SIZE=.*/SHARED_CACHE_SIZE=\"$1\"/" "$ENV_FILE"
+    fusermount3 -u "$HOME/shared" 2>/dev/null || true
+    echo "hot cache cap set to $1; the supervisor remounts within ~20s"
+    ;;
+esac
+HELPER
+        chmod +x "$HOME/.local/bin/shared-cache"
+
+        cat > "$HOME/.local/bin/shared-versions" <<'HELPER'
+#!/bin/bash
+# shared-versions <path-under-shared> [--restore <version-id>]
+# FileX records every overwrite of the shared folder in its own version
+# catalogue (independent of backend bucket versioning). List, or restore an
+# older revision by id. Rides the workspace's scoped read/list helper token —
+# the /api/ai surface is token-only, so this is exactly the power needed.
+ENV_FILE="$HOME/.config/dokploy/shared-mount.env"
+[ -f "$ENV_FILE" ] || { echo "no ~/shared mount configured"; exit 1; }
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+TARGET="Files://$${1:?usage: shared-versions <path> [--restore <version-id>]}"
+shift || true
+if [ "$${1:-}" = "--restore" ]; then
+  VID="$${2:?usage: shared-versions <path> --restore <version-id>}"
+  curl -s -X POST -H "Authorization: Bearer $SHARED_AI_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "{\"path\":\"$TARGET\",\"version_id\":$VID}" \
+    "$DOKPLOY_FX_URL/api/ai/versions/restore"
+  echo
+else
+  curl -s -H "Authorization: Bearer $SHARED_AI_TOKEN" \
+    "$DOKPLOY_FX_URL/api/ai/versions?path=$TARGET" | python3 -m json.tool
+fi
+HELPER
+        chmod +x "$HOME/.local/bin/shared-versions"
+
+        if ! mountpoint -q "$HOME/shared" 2>/dev/null; then
+          setsid flock -n "$HOME/.config/dokploy/shared-mount.lock" \
+            "$HOME/.local/bin/filex-shared-supervisor" >/dev/null 2>&1 &
+        fi
+      ) > /tmp/filex-shared.log 2>&1 &
+    fi
+
+    # -- wizard: Gitea identity lane --------------------------------------------
+    # The person who owns this workspace gets a Gitea account, springing at
+    # first boot: username = the coder login, email = their real Coder email —
+    # the same identity they already sign the rest of the stack in with. An
+    # admin-API create verifies and primaries the email instantly (measured),
+    # so it works as a login identifier from the first second and the wizard
+    # never needs a synthetic domain. Create-time password is the stack admin
+    # password (same choice as the OpenCode server and Hermes webapp), but the
+    # every-boot re-sync is admin-login-only: personal accounts keep whatever
+    # password their owner sets. The change-password
+    # flag is OFF because a pending must-change turns every basic-auth API
+    # call into a 403 (measured). The real email is itself the ownership
+    # marker: an existing account under a different email is a manual one —
+    # this lane skips it, never resets it — and one carrying the legacy
+    # convention email is a pre-fix wizard account, migrated in place. One
+    # SSH key per (user, workspace) rides the home volume: pushes over the
+    # built-in SSH server (overlay port 2222) name a
+    # person and a machine, and an ssh_config Host alias makes
+    # `git clone gitea:owner/repo.git` work out of the box. When the coder
+    # user is deleted the coder phase disables the account (wizard-sprung is
+    # proven by the state ledger, not by any roster signal — measured: none
+    # exists); re-adding the
+    # user re-enables it here at the next boot. Nothing here can take a
+    # workspace down: the whole lane runs in the background and every failure
+    # logs and exits.
+    DOKPLOY_WIZARD_GITEA_URL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL__"
+    # *_SENTINEL__ markers stay out of the replacement map (same trick as the
+    # issuer and FileX guards).
+    DOKPLOY_WIZARD_GITEA_URL_SENTINEL="__DOKPLOY_WIZARD_GITEA_INTERNAL_URL_SENTINEL__"
+    DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN__"
+    DOKPLOY_WIZARD_GITEA_PROVISIONER_SENTINEL="__DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN_SENTINEL__"
+    DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD="__DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD__"
+    if [ -n "$DOKPLOY_WIZARD_GITEA_URL" ] && \
+       [ "$DOKPLOY_WIZARD_GITEA_URL" != "$DOKPLOY_WIZARD_GITEA_URL_SENTINEL" ] && \
+       [ -n "$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN" ] && \
+       [ "$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN" != \
+         "$DOKPLOY_WIZARD_GITEA_PROVISIONER_SENTINEL" ]; then
+      export DOKPLOY_GT_URL="$DOKPLOY_WIZARD_GITEA_URL"
+      export DOKPLOY_GT_TOKEN="$DOKPLOY_WIZARD_GITEA_PROVISIONER_TOKEN"
+      export DOKPLOY_GT_LOGIN="${data.coder_workspace_owner.me.name}"
+      export DOKPLOY_GT_WORKSPACE="${data.coder_workspace.me.name}"
+      export DOKPLOY_GT_REAL_EMAIL="${data.coder_workspace_owner.me.email}"
+      # The deployer's own login is the only account whose password rides the
+      # stack admin secret on every boot; everyone else keeps the personal
+      # password they were seeded with (their Coder login is theirs to change).
+      export DOKPLOY_GT_ADMIN_LOGIN="__DOKPLOY_WIZARD_LITELLM_ADMIN_LOGIN__"
+      # The person signs in with the stack admin password — the same choice
+      # the OpenCode server and Hermes webapp tiles make: one operator
+      # credential, not a second secret to lose. Wizard-owned accounts get
+      # the password re-synced every boot only for the deployer's own login;
+      # everyone else's personal password survives, and a manual account that
+      # owns the name keeps its own (email-mismatch guard below).
+      export DOKPLOY_GT_PASSWORD="$DOKPLOY_WIZARD_GITEA_ACCOUNT_PASSWORD"
+      (
+        # Background on purpose, same rule as ~/shared: identity calls and
+        # apt locks must never hold the IDE hostage. set -e inside so the
+        # first real failure ends this subshell quietly; the boot doesn't care.
+        set -e
+        mkdir -p "$HOME/.ssh"
+        if ! command -v ssh-keygen >/dev/null 2>&1; then
+          # The foreground apt may still hold the dpkg lock behind us; retry
+          # past it for a minute before giving the lane up in the log.
+          for _attempt in 1 2 3 4 5 6; do
+            sleep 10
+            command -v ssh-keygen >/dev/null 2>&1 && break
+            $_SUDO apt-get -qq -y install openssh-client >/dev/null 2>&1 || true
+          done
+        fi
+        command -v ssh-keygen >/dev/null 2>&1 \
+          || { echo "gitea: no ssh-keygen; skipping identity lane"; exit 0; }
+        [ -f "$HOME/.ssh/id_ed25519_gitea" ] || ssh-keygen -q -t ed25519 -N '' \
+          -C "${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}@gitea" \
+          -f "$HOME/.ssh/id_ed25519_gitea"
+        python3 - <<'GITEAPROV'
+import base64, hashlib, json, os, subprocess, tempfile, urllib.error, urllib.parse, urllib.request
+
+base = os.environ["DOKPLOY_GT_URL"].rstrip("/")
+token = os.environ["DOKPLOY_GT_TOKEN"]
+login = os.environ["DOKPLOY_GT_LOGIN"]
+workspace = os.environ["DOKPLOY_GT_WORKSPACE"]
+password = os.environ["DOKPLOY_GT_PASSWORD"]
+email = os.environ.get("DOKPLOY_GT_REAL_EMAIL", "").strip().lower()
+legacy_email = login + "@coder.wizard.local"  # pre-fix spring value; never minted again
+title = login + "-" + workspace
+
+
+def note(message):
+    print("gitea: " + message)
+
+
+def call(method, path, auth=None, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    if auth:
+        req.add_header("Authorization", auth)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode() or "null")
+        except Exception:
+            return exc.code, None
+    except Exception:
+        return 0, None
+
+
+provisioner_auth = "Token " + token
+owner_basic = "Basic " + base64.b64encode((login + ":" + password).encode()).decode()
+user_path = urllib.parse.quote(login, safe="")
+
+# 1) The owner's account, lazily created through the provisioner — under
+#    their REAL email, which an admin-API create verifies and primaries on
+#    the spot (measured), so it doubles as a login identifier from the first
+#    second. A manual account owning the name under a different email is left
+#    exactly as it is; one carrying the pre-fix convention email is a legacy
+#    spring and gets its email migrated. The admin route serves
+#    GET only on the collection (GET /admin/users/<name> is a 405 and a missing
+#    name 404s from the redirect middleware — measured on the box), so the
+#    list is the only honest existence probe.
+def admin_user_row():
+    page = 1
+    while page <= 20:
+        status, rows = call("GET", "/api/v1/admin/users?page=%d" % page, provisioner_auth)
+        if status != 200 or not isinstance(rows, list):
+            return None, status
+        for row in rows:
+            if isinstance(row, dict) and row.get("username") == login:
+                return row, status
+        if len(rows) < 30:  # Gitea's default page size
+            return None, status
+        page += 1
+    return None, 200
+
+
+if not email:
+    note("skipped: no real email for '" + login + "'; no gitea identity to spring")
+    raise SystemExit
+user, status = admin_user_row()
+if user is None and status != 200:
+    note("skipped: provisioner token rejected by /api/v1/admin/users (HTTP %s)" % status)
+    raise SystemExit
+if user is None:
+    status, user = call(
+        "POST", "/api/v1/admin/users", provisioner_auth,
+        {"username": login, "email": email, "password": password,
+         "must_change_password": False, "send_notify_email": False},
+    )
+    if status not in (200, 201):
+        note("skipped: could not create the Gitea account (HTTP %s)" % status)
+        raise SystemExit
+    note("created the Gitea account for '" + login + "' as '" + email + "'")
+else:
+    primary = str(user.get("email") or "").lower()
+    if primary not in (email, legacy_email):
+        note("skipped: a manual Gitea account owns '" + login + "'")
+        raise SystemExit
+    if primary == legacy_email and email != legacy_email:
+        # Pre-fix spring: move the primary onto the real email. Measured:
+        # PATCH with an unused email verifies it, primaries it, and drops the
+        # old primary. A 409 means the real email already sits on some account
+        # (for pre-fix springs, on this one as a verified secondary — gitea
+        # refuses to promote its own secondaries through this door, and the
+        # per-email owner routes 404 in this build); the secondary still logs
+        # in, so note and carry on.
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth, {"email": email}
+        )
+        if status == 200:
+            note("migrated the account email to '" + email + "'")
+        elif status == 409:
+            note("kept legacy primary: '" + email + "' is already registered on the account")
+        else:
+            note("warning: email migration for '" + login + "' refused (HTTP %s)" % status)
+    if not user.get("active"):
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth, {"active": True}
+        )
+        if status == 200:
+            note("re-enabled the Gitea account for '" + login + "' (Coder user returned)")
+    # Wizard-owned account (the real email proves it). The password rule is
+    # admin-only: the deployer's own login rides the stack admin password on
+    # every boot (one operator credential, and an interim box rebuild can
+    # never strand it on a stale secret); everyone else keeps the personal
+    # password their account was created with — stomping a human's own login
+    # with the stack secret on every boot is how "username and passwords
+    # incorrect" happens to the person who just changed it.
+    admin_login = os.environ.get("DOKPLOY_GT_ADMIN_LOGIN", "").strip().lower()
+    if login == admin_login:
+        status, _body = call(
+            "PATCH", "/api/v1/admin/users/" + user_path, provisioner_auth,
+            {"login": login, "password": password, "must_change_password": False},
+        )
+        if status == 200:
+            note("synced the Gitea password for '" + login + "' to the stack admin password")
+        else:
+            note("warning: password sync for '" + login + "' refused (HTTP %s)" % status)
+    else:
+        note("kept the personal Gitea password for '" + login + "'")
+
+# 2) One SSH key per (user, workspace): content adopts, title replaces. The
+#    keypair lives on the home volume, so it survives restarts; a fresh home
+#    rotates it and the old title-matched key retires through the owner's own
+#    credentials (a password the human changed then simply leaves the stale
+#    key behind — harmless, the new one works).
+with open(os.path.expanduser("~/.ssh/id_ed25519_gitea.pub"), encoding="utf-8") as handle:
+    public = handle.read().strip()
+material = " ".join(public.split()[:2])
+status, keys = call("GET", "/api/v1/users/" + user_path + "/keys", provisioner_auth)
+rows = keys if isinstance(keys, list) else []
+adopted = any(
+    isinstance(row, dict) and " ".join(str(row.get("key") or "").split()[:2]) == material
+    for row in rows
+)
+if not adopted:
+    for row in rows:
+        if isinstance(row, dict) and row.get("title") == title:
+            status, _body = call(
+                "DELETE", "/api/v1/user/keys/%s" % row.get("id"), owner_basic
+            )
+            if status not in (200, 204):
+                note("warning: stale key '" + title + "' stayed behind (HTTP %s)" % status)
+    status, _body = call(
+        "POST", "/api/v1/admin/users/" + user_path + "/keys", provisioner_auth,
+        {"title": title, "key": public},
+    )
+    if status in (200, 201):
+        note("registered SSH key '" + title + "'")
+    else:
+        note("warning: SSH key registration failed (HTTP %s)" % status)
+
+# 3) ssh convenience over the overlay door: a Host alias + a pinned host key,
+#    so `git clone gitea:owner/repo.git` needs no first-connect prompt.
+parsed = urllib.parse.urlparse(base)
+host = parsed.hostname or ""
+port = 2222
+config_path = os.path.expanduser("~/.ssh/config")
+begin, end = "# BEGIN dokploy-wizard gitea", "# END dokploy-wizard gitea"
+try:
+    with open(config_path, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except FileNotFoundError:
+    lines = []
+try:
+    start = lines.index(begin)
+    stop = lines.index(end)
+    lines = lines[:start] + lines[stop + 1:]
+except ValueError:
+    pass
+if host:
+    lines.extend([
+        begin,
+        "Host gitea",
+        "  HostName " + host,
+        "  Port %d" % port,
+        "  User git",
+        "  IdentityFile ~/.ssh/id_ed25519_gitea",
+        "  IdentitiesOnly yes",
+        end,
+    ])
+with open(config_path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+os.chmod(config_path, 0o600)
+
+known_path = os.path.expanduser("~/.ssh/known_hosts")
+try:
+    with open(known_path, encoding="utf-8") as handle:
+        known = handle.read()
+except FileNotFoundError:
+    known = ""
+if host and ("[" + host + "]:" + str(port)) not in known:
+    scan = subprocess.run(
+        ["ssh-keyscan", "-p", str(port), host], capture_output=True, text=True, timeout=15
+    )
+    if scan.stdout:
+        with open(known_path, "a", encoding="utf-8") as handle:
+            handle.write(scan.stdout)
+        os.chmod(known_path, 0o644)
+
+# 4) Commit identity defaults, and only where the person has none yet.
+def git_get(key):
+    done = subprocess.run(
+        ["git", "config", "--global", "--get", key], capture_output=True, text=True
+    )
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+if host and not git_get("user.name"):
+    subprocess.run(["git", "config", "--global", "user.name", login], check=False)
+if host and not git_get("user.email"):
+    subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+
+# 5) The private demo repo: every wizard-sprung person gets a place to push
+#    from their very first boot. Created through the OWNER door, not the
+#    provisioner token — POST /api/v1/user/repos files the repo under the
+#    authenticated person (the admin token's owner field is honoured by
+#    /api/v1/admin/... routes only — measured), and it rides the privacy
+#    default explicitly: private. A repo that already stands is adopted
+#    untouched, even a public one: the owner's choice beats the seed's
+#    default. The seed push lands only in an empty repo and rides the
+#    workspace's own SSH key through the 'gitea' alias set up above.
+demo = "wizard-demo"
+status, repo = call("GET", "/api/v1/repos/" + user_path + "/" + demo, owner_basic)
+if status == 401:
+    note("skipped demo seed: basic auth refused (password changed outside the lane?)")
+elif status == 404:
+    status, created = call(
+        "POST", "/api/v1/user/repos", owner_basic,
+        {"name": demo, "private": True, "auto_init": False, "default_branch": "main"},
+    )
+    if status in (200, 201) and isinstance(created, dict):
+        note("created the private '" + demo + "' repo for '" + login + "'")
+        repo = created
+    else:
+        note("warning: could not create the '" + demo + "' repo (HTTP %s)" % status)
+        repo = None
+elif status == 200:
+    note("adopted the existing '" + demo + "' repo")
+if host and isinstance(repo, dict) and repo.get("empty"):
+    work = tempfile.mkdtemp(prefix="wizard-demo-")
+
+    def demo_run(args):
+        return subprocess.run(args, cwd=work, capture_output=True, text=True, timeout=30)
+
+    readme = (
+        "# " + demo + "\n\n"
+        "Private demo repository for **" + login + "**, seeded by the Dokploy\n"
+        "Wizard workspace boot lane. Push to it, break it, delete it — it is\n"
+        "yours.\n\n"
+        "    git clone gitea:" + login + "/" + demo + ".git\n"
+    )
+    with open(os.path.join(work, "README.md"), "w", encoding="utf-8") as handle:
+        handle.write(readme)
+    seeded = (
+        demo_run(["git", "init", "-b", "main"]).returncode == 0
+        and demo_run(["git", "add", "README.md"]).returncode == 0
+        and demo_run(
+            [
+                "git",
+                "-c", "user.name=" + login,
+                "-c", "user.email=" + email,
+                "commit",
+                "-m",
+                "wizard: private demo seed",
+            ]
+        ).returncode == 0
+        and demo_run(["git", "remote", "add", "origin",
+                      "git@gitea:" + login + "/" + demo + ".git"]).returncode == 0
+    )
+    pushed = seeded and demo_run(["git", "push", "origin", "main"]).returncode == 0
+    if pushed:
+        note("seeded '" + demo + "' with an initial commit over SSH")
+    elif seeded:
+        note("warning: '" + demo + "' seed push failed; the empty repo is ready to use")
+note("ready: git over the 'gitea' host alias clones as '" + title + "'")
+GITEAPROV
+      ) > /tmp/gitea-identity.log 2>&1 &
+    fi
 
     if ! command -v hermes >/dev/null 2>&1; then
       HERMES_HOME="$HERMES_HOME" HERMES_INSTALL_DIR="$HERMES_INSTALL_DIR" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup --channel "__DOKPLOY_WIZARD_HERMES_INSTALL_CHANNEL__"
@@ -350,12 +1270,19 @@ if "--daemon" in sys.argv[1:]:
         time.sleep(300 if refresh_rc else 43200)
 
 
-def fetch_model_ids() -> list[str]:
+def fetch_model_ids() -> tuple[list[str], dict[str, dict[str, float]]]:
+    """Return the servable model list plus per-alias costs echoed by the gateway.
+
+    LiteLLM stores input_cost_per_token/output_cost_per_token in each alias's
+    model_info, so the sync/* flat aliases come back priced and the pickers do
+    not have to reverse-map slugs onto registry keys.
+    """
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
-    model_ids = []
+    model_ids: list[str] = []
+    costs: dict[str, dict[str, float]] = {}
     for attempt in range(4):
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -364,6 +1291,7 @@ def fetch_model_ids() -> list[str]:
             payload = {"data": []}
 
         model_ids = []
+        costs = {}
         for item in payload.get("data", []):
             if not isinstance(item, dict):
                 continue
@@ -373,13 +1301,21 @@ def fetch_model_ids() -> list[str]:
             normalized = model_id.strip()
             if normalized and "/" in normalized and not normalized.endswith("/*") and not normalized.startswith("openai/"):
                 model_ids.append(normalized)
+            info = item.get("model_info")
+            if isinstance(info, dict):
+                try:
+                    cost_in = float(info["input_cost_per_token"]) * 1000000.0
+                    cost_out = float(info["output_cost_per_token"]) * 1000000.0
+                except (KeyError, TypeError, ValueError):
+                    continue
+                costs[normalized] = {"input": cost_in, "output": cost_out}
         if model_ids or attempt == 3:
-            return model_ids
+            return model_ids, costs
         time.sleep(10)
-    return model_ids
+    return model_ids, costs
 
 
-fetched_model_ids = fetch_model_ids()
+fetched_model_ids, fetched_model_costs = fetch_model_ids()
 if not fetched_model_ids and Path("/home/coder/.config/opencode/opencode.json").exists():
     # Gateway unreachable during a background refresh; keep the last good list
     # and exit non-zero so the daemon schedules a fast retry.
@@ -484,9 +1420,10 @@ write_vscode_copilot_byok_settings(base_url, api_key, model_ids)
 # daily so the daemon's twice-daily pass does not refetch the full catalog.
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_CACHE = Path("/home/coder/.cache/dokploy-models-dev.json")
+# Registry fallback for passthrough aliases only: the flat sync/<provider>-<model>
+# names the gateway mints cannot be reverse-mapped onto registry org/model keys,
+# but every sync alias carries the gateway-echoed cost from model_info instead.
 ALIAS_PROVIDERS = {
-    "sync/nvidia/": "nvidia",
-    "sync/openrouter/": "openrouter",
     "opencode-go/": "opencode-go",
     "opencode/": "opencode",
     "nvidia/": "nvidia",
@@ -541,6 +1478,9 @@ def _registry_costs():
 def _cost_for(alias, costs):
     if alias.endswith(":free"):
         return {"input": 0, "output": 0}
+    gateway = fetched_model_costs.get(alias)
+    if gateway is not None:
+        return gateway
     for prefix, provider_key in ALIAS_PROVIDERS.items():
         if alias.startswith(prefix):
             return costs.get(provider_key + "/" + alias[len(prefix):])
@@ -1640,6 +2580,23 @@ resource "docker_container" "workspace" {
 
   networks_advanced {
     name = data.docker_network.shared.name
+  }
+
+  # ~/shared rides an rclone FUSE mount. The workspace's own supervisor needs
+  # /dev/fuse plus CAP_SYS_ADMIN and an AppArmor profile that lets the mount()
+  # syscall through (the docker-default profile denies it: "mount failed:
+  # Permission denied", measured live). The docker provider Coder ships
+  # (kreuzwerker v4.7.0) cannot express capabilities — no cap_add, no
+  # capability block — so the container goes privileged. This is a
+  # single-tenant box and the container is already the user's own machine with
+  # their own secrets on it; privileged widens what that machine may do, not
+  # who may reach it.
+  privileged = true
+
+  devices {
+    container_path = "/dev/fuse"
+    host_path      = "/dev/fuse"
+    permissions    = "rwm"
   }
 
   volumes {

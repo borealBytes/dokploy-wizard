@@ -64,6 +64,9 @@ def test_build_litellm_admin_qa_harness_requires_access_challenge_and_internal_p
     assert DEFAULT_LOCAL_CANONICAL_ALIAS in harness.checks[3].failure_criteria
     assert "/v1/chat/completions" in harness.checks[3].shell_command
     assert "litellm-generated-keys.json" in harness.checks[3].shell_command
+    # The smoke probe authenticates with the coder-hermes consumer key, never the
+    # master key: a leaked master key in a probe command line is a QA incident.
+    assert "payload['virtual_keys']['coder-hermes']" in harness.checks[3].shell_command
     assert harness.checks[3].command == (
         "sh",
         "-lc",
@@ -183,10 +186,5 @@ def _desired_state(*, enable_tailscale: bool = False, tailscale_enable_ssh: bool
         hostnames={"dokploy": "dokploy.example.com"},
         seaweedfs_access_key=None,
         seaweedfs_secret_key=None,
-        openclaw_gateway_token=None,
-        openclaw_channels=(),
-        openclaw_replicas=None,
-        my_farm_advisor_channels=(),
-        my_farm_advisor_replicas=None,
         shared_core=build_shared_core_plan(stack_name="wizard-stack", enabled_packs=()),
     )

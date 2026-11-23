@@ -401,11 +401,11 @@ def test_cli_inspect_state_persists_live_drift_snapshot(tmp_path: Path) -> None:
         "host_local_route",
         "unknown_unmanaged",
     }
-    assert json.loads((state_dir / "desired-state.json").read_text(encoding="utf-8")) == payload
-    assert (
-        json.loads((state_dir / "raw-input.json").read_text(encoding="utf-8"))["format_version"]
-        == 1
-    )
+    snapshot = json.loads((state_dir / "inspection-snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["desired_state"] == payload
+    assert snapshot["raw_input"]["format_version"] == 1
+    assert not (state_dir / "desired-state.json").exists()
+    assert not (state_dir / "raw-input.json").exists()
     assert not (state_dir / "applied-state.json").exists()
     assert not (state_dir / "ownership-ledger.json").exists()
 

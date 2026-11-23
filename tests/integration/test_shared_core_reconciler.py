@@ -28,21 +28,17 @@ from dokploy_wizard.networking import (
     CloudflareTunnel,
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
-from dokploy_wizard.packs.nextcloud import (
-    NextcloudBundleVerification,
-    NextcloudCommandCheck,
-    NextcloudResourceRecord,
-    TalkRuntime,
-)
 from dokploy_wizard.state import (
     AppliedStateCheckpoint,
     OwnedResource,
     OwnershipLedger,
     RawEnvInput,
     load_state_dir,
+    parse_env_file,
     resolve_desired_state,
     write_applied_checkpoint,
 )
+from tests.integration.test_matrix_pack import FakeMatrixBackend
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -108,6 +104,12 @@ class FakeCloudflareBackend:
         self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
     ) -> None:
         del account_id, tunnel_id, ingress
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
 
     def list_dns_records(
         self,
@@ -471,120 +473,25 @@ class FakeHeadscaleBackend:
         return True
 
 
-@dataclass
-class FakeNextcloudBackend:
-    services: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-    volumes: dict[str, NextcloudResourceRecord] = field(default_factory=dict)
-
-    def get_service(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.services.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_service_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.services.get(resource_name)
-
-    def create_service(
-        self,
-        *,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del hostname, data_volume_name, config
-        record = NextcloudResourceRecord(
-            resource_id=f"service:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.services[resource_name] = record
-        return record
-
-    def update_service(
-        self,
-        *,
-        resource_id: str,
-        resource_name: str,
-        hostname: str,
-        data_volume_name: str,
-        config: dict[str, str],
-    ) -> NextcloudResourceRecord:
-        del resource_id
-        return self.create_service(
-            resource_name=resource_name,
-            hostname=hostname,
-            data_volume_name=data_volume_name,
-            config=config,
-        )
-
-    def get_volume(self, resource_id: str) -> NextcloudResourceRecord | None:
-        for record in self.volumes.values():
-            if record.resource_id == resource_id:
-                return record
-        return None
-
-    def find_volume_by_name(self, resource_name: str) -> NextcloudResourceRecord | None:
-        return self.volumes.get(resource_name)
-
-    def create_volume(self, *, resource_name: str) -> NextcloudResourceRecord:
-        record = NextcloudResourceRecord(
-            resource_id=f"volume:{resource_name}",
-            resource_name=resource_name,
-        )
-        self.volumes[resource_name] = record
-        return record
-
-    def check_health(self, *, service: NextcloudResourceRecord, url: str) -> bool:
-        del service, url
-        return True
-
-    def ensure_application_ready(
-        self, *, nextcloud_url: str, onlyoffice_url: str
-    ) -> NextcloudBundleVerification:
-        del nextcloud_url, onlyoffice_url
-        return NextcloudBundleVerification(
-            onlyoffice_document_server_check=NextcloudCommandCheck(
-                command="php occ onlyoffice:documentserver --check",
-                passed=True,
-            ),
-            talk=TalkRuntime(
-                app_id="spreed",
-                enabled=True,
-                enabled_check=NextcloudCommandCheck(
-                    command="php occ app:list --output=json",
-                    passed=True,
-                ),
-                signaling_check=NextcloudCommandCheck(
-                    command="php occ talk:signaling:list --output=json",
-                    passed=True,
-                ),
-                stun_check=NextcloudCommandCheck(
-                    command="php occ talk:stun:list --output=json",
-                    passed=True,
-                ),
-                turn_check=NextcloudCommandCheck(
-                    command="php occ talk:turn:list --output=json",
-                    passed=True,
-                ),
-            ),
-        )
-
-    def refresh_openclaw_external_storage(self, *, admin_user: str) -> None:
-        del admin_user
 
 
-def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Path) -> None:
+def test_install_plans_and_persists_shared_core_once_for_matrix(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
+    base_raw_input = parse_env_file(FIXTURES_DIR / "nextcloud.env")
+    raw_env = RawEnvInput(
+        format_version=base_raw_input.format_version,
+        values={**base_raw_input.values, "ENABLE_MATRIX": "true"},
+    )
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
         state_dir=state_dir,
         dry_run=False,
+        raw_env=raw_env,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
         headscale_backend=FakeHeadscaleBackend(),
-        nextcloud_backend=FakeNextcloudBackend(),
+        matrix_backend=FakeMatrixBackend(),
     )
 
     loaded_state = load_state_dir(state_dir)
@@ -600,7 +507,7 @@ def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Pat
         "networking",
         "shared_core",
         "headscale",
-        "nextcloud",
+        "matrix",
     )
     assert loaded_state.ownership_ledger is not None
     assert {
@@ -611,40 +518,44 @@ def test_install_plans_and_persists_shared_core_once_for_nextcloud(tmp_path: Pat
         ("cloudflare_dns_record", "zone:zone-123:dokploy.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:litellm.example.com"),
         ("cloudflare_dns_record", "zone:zone-123:headscale.example.com"),
-        ("cloudflare_dns_record", "zone:zone-123:nextcloud.example.com"),
-        ("cloudflare_dns_record", "zone:zone-123:office.example.com"),
+        ("cloudflare_dns_record", "zone:zone-123:matrix.example.com"),
         ("headscale_service", "stack:nextcloud-stack:headscale"),
         ("shared_core_litellm", "stack:nextcloud-stack:shared-litellm"),
         ("shared_core_network", "stack:nextcloud-stack:shared-network"),
         ("shared_core_postgres", "stack:nextcloud-stack:shared-postgres"),
         ("shared_core_redis", "stack:nextcloud-stack:shared-redis"),
-        ("nextcloud_service", "stack:nextcloud-stack:nextcloud-service"),
-        ("onlyoffice_service", "stack:nextcloud-stack:onlyoffice-service"),
-        ("nextcloud_volume", "stack:nextcloud-stack:nextcloud-volume"),
-        ("onlyoffice_volume", "stack:nextcloud-stack:onlyoffice-volume"),
+        ("matrix_service", "stack:nextcloud-stack:matrix-service"),
+        ("matrix_data", "stack:nextcloud-stack:matrix-data"),
     }
 
 
 def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
+    base_raw_input = parse_env_file(FIXTURES_DIR / "nextcloud.env")
+    raw_env = RawEnvInput(
+        format_version=base_raw_input.format_version,
+        values={**base_raw_input.values, "ENABLE_MATRIX": "true"},
+    )
     shared_backend = FakeSharedCoreBackend()
     headscale_backend = FakeHeadscaleBackend()
-    nextcloud_backend = FakeNextcloudBackend()
+    matrix_backend = FakeMatrixBackend()
     run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
         state_dir=state_dir,
         dry_run=False,
+        raw_env=raw_env,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=shared_backend,
         headscale_backend=headscale_backend,
-        nextcloud_backend=nextcloud_backend,
+        matrix_backend=matrix_backend,
     )
 
     summary = run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
         state_dir=state_dir,
         dry_run=False,
+        raw_env=raw_env,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(
             existing_tunnel=CloudflareTunnel(
@@ -673,16 +584,9 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
                     content="nextcloud-tunnel.cfargotunnel.com",
                     proxied=True,
                 ),
-                "nextcloud.example.com": CloudflareDnsRecord(
-                    record_id="dns-nextcloud.example.com",
-                    name="nextcloud.example.com",
-                    record_type="CNAME",
-                    content="nextcloud-tunnel.cfargotunnel.com",
-                    proxied=True,
-                ),
-                "office.example.com": CloudflareDnsRecord(
-                    record_id="dns-office.example.com",
-                    name="office.example.com",
+                "matrix.example.com": CloudflareDnsRecord(
+                    record_id="dns-matrix.example.com",
+                    name="matrix.example.com",
                     record_type="CNAME",
                     content="nextcloud-tunnel.cfargotunnel.com",
                     proxied=True,
@@ -691,7 +595,7 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
         ),
         shared_core_backend=shared_backend,
         headscale_backend=headscale_backend,
-        nextcloud_backend=nextcloud_backend,
+        matrix_backend=matrix_backend,
     )
 
     assert summary["shared_core"]["outcome"] == "already_present"
@@ -705,9 +609,9 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
     assert shared_backend.create_redis_calls == 1
     assert shared_backend.ensured_allocations == (
         SharedPostgresAllocation(
-            database_name="nextcloud_stack_nextcloud",
-            user_name="nextcloud_stack_nextcloud",
-            password_secret_ref="nextcloud-stack-nextcloud-postgres-password",
+            database_name="nextcloud_stack_matrix",
+            user_name="nextcloud_stack_matrix",
+            password_secret_ref="nextcloud-stack-matrix-postgres-password",
         ),
         SharedPostgresAllocation(
             database_name="nextcloud_stack_litellm",
@@ -719,16 +623,23 @@ def test_install_rerun_reuses_owned_shared_core_resources(tmp_path: Path) -> Non
 
 def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
+    base_raw_input = parse_env_file(FIXTURES_DIR / "nextcloud.env")
+    raw_env = RawEnvInput(
+        format_version=base_raw_input.format_version,
+        values={**base_raw_input.values, "ENABLE_MATRIX": "true"},
+    )
     headscale_backend = FakeHeadscaleBackend()
+    matrix_backend = FakeMatrixBackend()
     run_install_flow(
         env_file=FIXTURES_DIR / "nextcloud.env",
         state_dir=state_dir,
         dry_run=False,
+        raw_env=raw_env,
         bootstrap_backend=FakeDokployBackend(True, True),
         networking_backend=FakeCloudflareBackend(),
         shared_core_backend=FakeSharedCoreBackend(),
         headscale_backend=headscale_backend,
-        nextcloud_backend=FakeNextcloudBackend(),
+        matrix_backend=matrix_backend,
     )
 
     with pytest.raises(SharedCoreError, match="shared-core resource 'shared_core_network' exists"):
@@ -736,6 +647,7 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
             env_file=FIXTURES_DIR / "nextcloud.env",
             state_dir=state_dir,
             dry_run=False,
+            raw_env=raw_env,
             bootstrap_backend=FakeDokployBackend(True, True),
             networking_backend=FakeCloudflareBackend(
                 existing_tunnel=CloudflareTunnel(
@@ -764,16 +676,9 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
                         content="nextcloud-tunnel.cfargotunnel.com",
                         proxied=True,
                     ),
-                    "nextcloud.example.com": CloudflareDnsRecord(
-                        record_id="dns-nextcloud.example.com",
-                        name="nextcloud.example.com",
-                        record_type="CNAME",
-                        content="nextcloud-tunnel.cfargotunnel.com",
-                        proxied=True,
-                    ),
-                    "office.example.com": CloudflareDnsRecord(
-                        record_id="dns-office.example.com",
-                        name="office.example.com",
+                    "matrix.example.com": CloudflareDnsRecord(
+                        record_id="dns-matrix.example.com",
+                        name="matrix.example.com",
                         record_type="CNAME",
                         content="nextcloud-tunnel.cfargotunnel.com",
                         proxied=True,
@@ -782,7 +687,7 @@ def test_install_fails_closed_when_shared_core_owned_resource_drifted(tmp_path: 
             ),
             shared_core_backend=FakeSharedCoreBackend(),
             headscale_backend=headscale_backend,
-            nextcloud_backend=FakeNextcloudBackend(),
+            matrix_backend=matrix_backend,
         )
 
 
@@ -797,7 +702,7 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
             values={
                 "STACK_NAME": "nextcloud-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MATRIX": "true",
                 "DOKPLOY_API_URL": "https://dokploy.example.com",
                 "DOKPLOY_API_KEY": "dokp-key-123",
             },
@@ -833,9 +738,9 @@ def test_dokploy_shared_core_backend_creates_project_compose_and_reuses_owned_re
     assert provisioned == [
         (
             SharedPostgresAllocation(
-                database_name="nextcloud_stack_nextcloud",
-                user_name="nextcloud_stack_nextcloud",
-                password_secret_ref="nextcloud-stack-nextcloud-postgres-password",
+                database_name="nextcloud_stack_matrix",
+                user_name="nextcloud_stack_matrix",
+                password_secret_ref="nextcloud-stack-matrix-postgres-password",
             ),
             SharedPostgresAllocation(
                 database_name="nextcloud_stack_litellm",
@@ -885,7 +790,7 @@ def test_shared_core_reconciles_litellm_after_postgres_allocations() -> None:
             values={
                 "STACK_NAME": "nextcloud-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MATRIX": "true",
             },
         )
     )
@@ -918,7 +823,7 @@ def test_dokploy_shared_core_backend_defers_litellm_runtime_until_explicit_recon
             values={
                 "STACK_NAME": "nextcloud-stack",
                 "ROOT_DOMAIN": "example.com",
-                "ENABLE_NEXTCLOUD": "true",
+                "ENABLE_MATRIX": "true",
                 "DOKPLOY_API_URL": "https://dokploy.example.com",
                 "DOKPLOY_API_KEY": "dokp-key-123",
             },

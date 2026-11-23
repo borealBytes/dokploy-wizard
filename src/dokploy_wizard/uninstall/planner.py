@@ -19,37 +19,43 @@ from dokploy_wizard.networking import (
     DNS_RESOURCE_TYPE,
     TUNNEL_RESOURCE_TYPE,
 )
-from dokploy_wizard.packs.coder import CODER_DATA_RESOURCE_TYPE, CODER_SERVICE_RESOURCE_TYPE
+from dokploy_wizard.packs.coder import (
+    CODER_DATA_RESOURCE_TYPE,
+    CODER_IDENTITY_TIMER_RESOURCE_TYPE,
+    CODER_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.docuseal import (
     DOCUSEAL_DATA_RESOURCE_TYPE,
     DOCUSEAL_SERVICE_RESOURCE_TYPE,
 )
+from dokploy_wizard.packs.filex import (
+    FILEX_DATA_RESOURCE_TYPE,
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE,
+    FILEX_SERVICE_RESOURCE_TYPE,
+)
+from dokploy_wizard.packs.gitea import (
+    GITEA_DATA_RESOURCE_TYPE,
+    GITEA_SERVICE_RESOURCE_TYPE,
+)
 from dokploy_wizard.packs.headscale import HEADSCALE_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.matrix import MATRIX_DATA_RESOURCE_TYPE, MATRIX_SERVICE_RESOURCE_TYPE
 from dokploy_wizard.packs.moodle import MOODLE_DATA_RESOURCE_TYPE, MOODLE_SERVICE_RESOURCE_TYPE
-from dokploy_wizard.packs.nextcloud import (
-    NEXTCLOUD_SERVICE_RESOURCE_TYPE,
-    NEXTCLOUD_VOLUME_RESOURCE_TYPE,
-    ONLYOFFICE_SERVICE_RESOURCE_TYPE,
-    ONLYOFFICE_VOLUME_RESOURCE_TYPE,
-)
-from dokploy_wizard.packs.openclaw import (
-    MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE,
-    OPENCLAW_SERVICE_RESOURCE_TYPE,
-)
 from dokploy_wizard.packs.seaweedfs import (
     SEAWEEDFS_DATA_RESOURCE_TYPE,
     SEAWEEDFS_SERVICE_RESOURCE_TYPE,
 )
-from dokploy_wizard.packs.surfsense import (
-    SURFSENSE_DATA_RESOURCE_TYPE,
-    SURFSENSE_SERVICE_RESOURCE_TYPE,
-)
 from dokploy_wizard.state import DesiredState, OwnedResource, OwnershipLedger, RawEnvInput
 from dokploy_wizard.tailscale import TAILSCALE_NODE_RESOURCE_TYPE
+
+# Resource types of retired packs, kept as literal strings so a box whose ledger
+# still names them can be uninstalled without resurrecting the pack modules.
+MY_FARM_ADVISOR_SERVICE_RESOURCE_TYPE = "my_farm_advisor_service"
+OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE = "openclaw_mem0_service"
+OPENCLAW_QDRANT_SERVICE_RESOURCE_TYPE = "openclaw_qdrant_service"
+OPENCLAW_RUNTIME_SERVICE_RESOURCE_TYPE = "openclaw_runtime_service"
+OPENCLAW_SERVICE_RESOURCE_TYPE = "openclaw_service"
+SURFSENSE_DATA_RESOURCE_TYPE = "surfsense_data"
+SURFSENSE_SERVICE_RESOURCE_TYPE = "surfsense_service"
 
 
 class UninstallPlanningError(RuntimeError):
@@ -100,6 +106,16 @@ class UninstallPlan:
         }
 
 
+# Retired-pack ledger literals. The Nextcloud + OnlyOffice pack shipped in the
+# first generation and its module is gone, but every ledger written by those
+# installs still carries these rows and the uninstall sweep must keep honoring
+# them — the ownership ledger is the uninstall authority, and an unmapped type
+# there strands a volume with no deletion plan.
+NEXTCLOUD_SERVICE_RESOURCE_TYPE = "nextcloud_service"
+ONLYOFFICE_SERVICE_RESOURCE_TYPE = "onlyoffice_service"
+NEXTCLOUD_VOLUME_RESOURCE_TYPE = "nextcloud_volume"
+ONLYOFFICE_VOLUME_RESOURCE_TYPE = "onlyoffice_volume"
+
 _RULES: dict[str, DeletionRule] = {
     TAILSCALE_NODE_RESOURCE_TYPE: DeletionRule(phase="tailscale", retain_safe=True, priority=5),
     ACCESS_OTP_PROVIDER_RESOURCE_TYPE: DeletionRule(
@@ -138,11 +154,24 @@ _RULES: dict[str, DeletionRule] = {
         phase="docuseal", retain_safe=True, priority=26
     ),
     DOCUSEAL_DATA_RESOURCE_TYPE: DeletionRule(phase="docuseal", retain_safe=False, priority=27),
+    FILEX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=True, priority=32),
+    FILEX_DATA_RESOURCE_TYPE: DeletionRule(phase="filex", retain_safe=False, priority=33),
+    FILEX_OFFICE_VOLUME_RESOURCE_TYPE: DeletionRule(
+        phase="filex", retain_safe=False, priority=34
+    ),
+    GITEA_SERVICE_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=True, priority=34),
+    GITEA_DATA_RESOURCE_TYPE: DeletionRule(phase="gitea", retain_safe=False, priority=35),
     SEAWEEDFS_SERVICE_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=True, priority=28),
     SEAWEEDFS_DATA_RESOURCE_TYPE: DeletionRule(phase="seaweedfs", retain_safe=False, priority=29),
     SURFSENSE_SERVICE_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=True, priority=30),
     SURFSENSE_DATA_RESOURCE_TYPE: DeletionRule(phase="surfsense", retain_safe=False, priority=31),
     CODER_SERVICE_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=True, priority=30),
+    # The identity timer pair is host runtime state, not data: it goes with the
+    # pack in both modes (a timer syncing accounts into a torn-down stack is
+    # just journal noise). First coder deletion, before the service itself.
+    CODER_IDENTITY_TIMER_RESOURCE_TYPE: DeletionRule(
+        phase="coder", retain_safe=True, priority=29
+    ),
     CODER_DATA_RESOURCE_TYPE: DeletionRule(phase="coder", retain_safe=False, priority=31),
     MATRIX_SERVICE_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=True, priority=30),
     MATRIX_DATA_RESOURCE_TYPE: DeletionRule(phase="matrix", retain_safe=False, priority=31),
@@ -170,13 +199,15 @@ _PHASE_ORDER = {
     "nextcloud": 4,
     "moodle": 5,
     "docuseal": 6,
-    "seaweedfs": 7,
-    "surfsense": 8,
-    "coder": 9,
-    "matrix": 10,
-    "headscale": 11,
-    "shared_core": 12,
-    "networking": 13,
+    "filex": 7,
+    "gitea": 8,
+    "seaweedfs": 9,
+    "surfsense": 10,
+    "coder": 11,
+    "matrix": 12,
+    "headscale": 13,
+    "shared_core": 14,
+    "networking": 15,
 }
 
 _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
@@ -185,9 +216,11 @@ _PACK_RUNTIME_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "nextcloud": (NEXTCLOUD_SERVICE_RESOURCE_TYPE, ONLYOFFICE_SERVICE_RESOURCE_TYPE),
     "moodle": (MOODLE_SERVICE_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_SERVICE_RESOURCE_TYPE,),
+    "filex": (FILEX_SERVICE_RESOURCE_TYPE,),
+    "gitea": (GITEA_SERVICE_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_SERVICE_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_SERVICE_RESOURCE_TYPE,),
-    "coder": (CODER_SERVICE_RESOURCE_TYPE,),
+    "coder": (CODER_SERVICE_RESOURCE_TYPE, CODER_IDENTITY_TIMER_RESOURCE_TYPE),
     "openclaw": (
         OPENCLAW_SERVICE_RESOURCE_TYPE,
         OPENCLAW_MEM0_SERVICE_RESOURCE_TYPE,
@@ -208,6 +241,8 @@ _PACK_DATA_RESOURCE_TYPES: dict[str, tuple[str, ...]] = {
     "nextcloud": (NEXTCLOUD_VOLUME_RESOURCE_TYPE, ONLYOFFICE_VOLUME_RESOURCE_TYPE),
     "moodle": (MOODLE_DATA_RESOURCE_TYPE,),
     "docuseal": (DOCUSEAL_DATA_RESOURCE_TYPE,),
+    "filex": (FILEX_DATA_RESOURCE_TYPE, FILEX_OFFICE_VOLUME_RESOURCE_TYPE),
+    "gitea": (GITEA_DATA_RESOURCE_TYPE,),
     "seaweedfs": (SEAWEEDFS_DATA_RESOURCE_TYPE,),
     "surfsense": (SURFSENSE_DATA_RESOURCE_TYPE,),
     "coder": (CODER_DATA_RESOURCE_TYPE,),
@@ -222,6 +257,8 @@ _PACK_HOSTNAME_KEYS: dict[str, tuple[str, ...]] = {
     "nextcloud": ("nextcloud", "onlyoffice"),
     "moodle": ("moodle",),
     "docuseal": ("docuseal",),
+    "filex": ("filex", "onlyoffice"),
+    "gitea": ("gitea",),
     "seaweedfs": ("s3",),
     "surfsense": ("surfsense", "surfsense-api", "surfsense-zero"),
     "coder": ("coder",),
@@ -330,11 +367,18 @@ def build_pack_disable_plan(
         for pack_name in removed_packs
         for resource_type in _PACK_DATA_RESOURCE_TYPES.get(pack_name, ())
     }
+    # A removed pack's hostname is only actually removed when the requested
+    # state does not want that FQDN under some other key: the ONLYOFFICE
+    # editing sidecar inherited the retired nextcloud pack's `onlyoffice`
+    # hostname (same key, same subdomain default), so its DNS and Access
+    # rows ride the transition untouched.
+    requested_fqdns = set(requested_desired.hostnames.values())
     removed_hostnames = {
         existing_desired.hostnames[key]
         for pack_name in removed_packs
         for key in _PACK_HOSTNAME_KEYS.get(pack_name, ())
         if key in existing_desired.hostnames
+        and existing_desired.hostnames[key] not in requested_fqdns
     }
     if (
         existing_desired.shared_core.requires_reconciliation()
@@ -360,7 +404,13 @@ def build_pack_disable_plan(
             ACCESS_APPLICATION_RESOURCE_TYPE,
             ACCESS_POLICY_RESOURCE_TYPE,
         }:
-            if _access_scope_matches_any_hostname(resource.scope, removed_hostnames):
+            # Either a gated hostname left the stack (its app and policy go with
+            # it) or Access was disabled outright. The OTP provider itself is
+            # Cloudflare's account-level built-in, so only its ledger entry is
+            # dropped; the application and its policy are deleted upstream.
+            if access_disable_only or _access_scope_matches_any_hostname(
+                resource.scope, removed_hostnames
+            ):
                 deletions.append(
                     PlannedDeletion(
                         resource=resource,
@@ -461,16 +511,6 @@ def compute_remaining_completed_steps(
         if not _has_resource_type(resources_by_type, MATRIX_DATA_RESOURCE_TYPE):
             return tuple(prefix)
         prefix.append("matrix")
-    if "nextcloud" in desired_state.enabled_packs:
-        for resource_type in (
-            NEXTCLOUD_SERVICE_RESOURCE_TYPE,
-            ONLYOFFICE_SERVICE_RESOURCE_TYPE,
-            NEXTCLOUD_VOLUME_RESOURCE_TYPE,
-            ONLYOFFICE_VOLUME_RESOURCE_TYPE,
-        ):
-            if not _has_resource_type(resources_by_type, resource_type):
-                return tuple(prefix)
-        prefix.append("nextcloud")
     if "moodle" in desired_state.enabled_packs:
         if not _has_resource_type(resources_by_type, MOODLE_SERVICE_RESOURCE_TYPE):
             return tuple(prefix)
@@ -483,6 +523,12 @@ def compute_remaining_completed_steps(
         if not _has_resource_type(resources_by_type, DOCUSEAL_DATA_RESOURCE_TYPE):
             return tuple(prefix)
         prefix.append("docuseal")
+    if "filex" in desired_state.enabled_packs:
+        if not _has_resource_type(resources_by_type, FILEX_SERVICE_RESOURCE_TYPE):
+            return tuple(prefix)
+        if not _has_resource_type(resources_by_type, FILEX_DATA_RESOURCE_TYPE):
+            return tuple(prefix)
+        prefix.append("filex")
     if "seaweedfs" in desired_state.enabled_packs:
         if not _has_resource_type(resources_by_type, SEAWEEDFS_SERVICE_RESOURCE_TYPE):
             return tuple(prefix)

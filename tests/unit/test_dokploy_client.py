@@ -590,12 +590,12 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
             "data": [
                 {
                     "scheduleId": "sch-1",
-                    "name": "wizard-openclaw-rescan",
-                    "serviceName": "wizard-nextcloud",
+                    "name": "wizard-gitea-backup",
+                    "serviceName": "wizard-gitea",
                     "cronExpression": "*/15 * * * *",
                     "timezone": "UTC",
                     "shellType": "bash",
-                    "command": "php /var/www/html/occ files:scan --path=...",
+                    "command": "gitea dump -c /app.ini",
                     "enabled": True,
                 }
             ]
@@ -613,7 +613,7 @@ def test_dokploy_client_lists_compose_schedules_with_query_string() -> None:
         "https://dokploy.example.com/api/schedule.list?id=cmp-1&scheduleType=compose"
     )
     assert schedules[0].schedule_id == "sch-1"
-    assert schedules[0].service_name == "wizard-nextcloud"
+    assert schedules[0].service_name == "wizard-gitea"
 
 
 def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None:
@@ -626,12 +626,12 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-openclaw-rescan",
-                "serviceName": "wizard-nextcloud",
+                "name": "wizard-gitea-backup",
+                "serviceName": "wizard-gitea",
                 "cronExpression": "*/15 * * * *",
                 "timezone": "UTC",
                 "shellType": "bash",
-                "command": "php /var/www/html/occ files:scan --path=...",
+                "command": "gitea dump -c /app.ini",
                 "enabled": True,
             }
         }
@@ -643,25 +643,25 @@ def test_dokploy_client_creates_compose_schedule_with_expected_payload() -> None
     )
 
     record = client.create_schedule(
-        name="wizard-openclaw-rescan",
+        name="wizard-gitea-backup",
         compose_id="cmp-1",
-        service_name="wizard-nextcloud",
+        service_name="wizard-gitea",
         cron_expression="*/15 * * * *",
         timezone="UTC",
         shell_type="bash",
-        command="php /var/www/html/occ files:scan --path=...",
+        command="gitea dump -c /app.ini",
         enabled=True,
     )
 
     assert captured["url"] == "https://dokploy.example.com/api/schedule.create"
     assert captured["body"] == {
-        "name": "wizard-openclaw-rescan",
+        "name": "wizard-gitea-backup",
         "composeId": "cmp-1",
-        "serviceName": "wizard-nextcloud",
+        "serviceName": "wizard-gitea",
         "cronExpression": "*/15 * * * *",
         "timezone": "UTC",
         "shellType": "bash",
-        "command": "php /var/www/html/occ files:scan --path=...",
+        "command": "gitea dump -c /app.ini",
         "scheduleType": "compose",
         "enabled": True,
     }
@@ -678,12 +678,12 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
         return {
             "data": {
                 "scheduleId": "sch-1",
-                "name": "wizard-openclaw-rescan",
-                "serviceName": "wizard-nextcloud",
+                "name": "wizard-gitea-backup",
+                "serviceName": "wizard-gitea",
                 "cronExpression": "0 * * * *",
                 "timezone": "America/Detroit",
                 "shellType": "bash",
-                "command": "php /var/www/html/occ files:scan --path=...",
+                "command": "gitea dump -c /app.ini",
                 "enabled": True,
             }
         }
@@ -696,26 +696,26 @@ def test_dokploy_client_updates_compose_schedule_with_expected_payload() -> None
 
     record = client.update_schedule(
         schedule_id="sch-1",
-        name="wizard-openclaw-rescan",
+        name="wizard-gitea-backup",
         compose_id="cmp-1",
-        service_name="wizard-nextcloud",
+        service_name="wizard-gitea",
         cron_expression="0 * * * *",
         timezone="America/Detroit",
         shell_type="bash",
-        command="php /var/www/html/occ files:scan --path=...",
+        command="gitea dump -c /app.ini",
         enabled=True,
     )
 
     assert captured["url"] == "https://dokploy.example.com/api/schedule.update"
     assert captured["body"] == {
         "scheduleId": "sch-1",
-        "name": "wizard-openclaw-rescan",
+        "name": "wizard-gitea-backup",
         "composeId": "cmp-1",
-        "serviceName": "wizard-nextcloud",
+        "serviceName": "wizard-gitea",
         "cronExpression": "0 * * * *",
         "timezone": "America/Detroit",
         "shellType": "bash",
-        "command": "php /var/www/html/occ files:scan --path=...",
+        "command": "gitea dump -c /app.ini",
         "scheduleType": "compose",
         "enabled": True,
     }
@@ -758,3 +758,92 @@ def test_dokploy_client_ai_provider_test_connection_requires_session_fallback() 
             api_key="sk-dokploy-ai",
             model="local/model",
         )
+
+
+def _http_error(
+    req: request.Request, code: int, *, retry_after: str | None = None
+) -> error.HTTPError:
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return error.HTTPError(
+        req.full_url, code, "reason", headers, BytesIO(b'{"message":"Rate limit exceeded"}')
+    )
+
+
+def test_dokploy_client_retries_429_honoring_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _http_error(req, 429, retry_after="2")
+        return {"data": []}
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    assert client.list_projects() == ()
+    assert attempts == 2
+    assert sleeps == [2.0]
+
+
+def test_dokploy_client_gives_up_after_bounded_429_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dokploy_wizard.dokploy import client as client_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise _http_error(req, 429)
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="status 429"):
+        client.list_projects()
+    assert attempts == 1 + client_module._DOKPLOY_429_MAX_RETRIES
+    # No Retry-After header: the bounded fallback delay applies per retry.
+    assert sleeps == [client_module._DOKPLOY_429_FALLBACK_DELAY_SECONDS] * 3
+
+
+def test_dokploy_client_does_not_retry_non_429_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    attempts = 0
+
+    def fake_request(req: request.Request) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise _http_error(req, 500)
+
+    client = DokployApiClient(
+        api_url="https://dokploy.example.com/api",
+        api_key="dokp-key-123",
+        request_fn=fake_request,
+    )
+
+    with pytest.raises(DokployApiError, match="status 500"):
+        client.list_projects()
+    assert attempts == 1
+    assert sleeps == []

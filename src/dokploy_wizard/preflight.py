@@ -128,9 +128,7 @@ def derive_required_profile(desired_state: DesiredState) -> ResourceProfile:
         for pack_name in desired_state.enabled_packs
         if get_pack_definition(pack_name).resource_profile == "recommended"
     }
-    if {"matrix", "nextcloud"}.issubset(recommended_packs) and (
-        "openclaw" in recommended_packs or "my-farm-advisor" in recommended_packs
-    ):
+    if {"matrix", "coder"}.issubset(recommended_packs):
         return FULL_PACK_SET_PROFILE
     if recommended_packs:
         return RECOMMENDED_PROFILE

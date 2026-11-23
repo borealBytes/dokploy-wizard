@@ -27,6 +27,7 @@ from dokploy_wizard.networking import (
     CloudflareTunnel,
 )
 from dokploy_wizard.packs.headscale import HeadscaleResourceRecord
+from dokploy_wizard.packs.seaweedfs import internal_s3_hostname
 from dokploy_wizard.state import RawEnvInput, load_state_dir, resolve_desired_state
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
@@ -85,6 +86,12 @@ class FakeCloudflareBackend:
         self, account_id: str, tunnel_id: str, ingress: tuple[dict[str, object], ...]
     ) -> None:
         del account_id, tunnel_id, ingress
+
+    def ensure_always_use_https(self, zone_id: str) -> bool:
+        if not hasattr(self, "always_use_https_calls"):
+            self.always_use_https_calls: list[str] = []
+        self.always_use_https_calls.append(zone_id)
+        return False
 
     def list_dns_records(
         self,
@@ -318,7 +325,7 @@ class FakeDokployApiClient:
         self, *, compose_id: str, compose_file: str | None = None, env: str | None = None
     ):
         del compose_file, env
-        return DokployComposeRecord(compose_id=compose_id, name="nextcloud-stack-seaweedfs")
+        return DokployComposeRecord(compose_id=compose_id, name="seaweedfs-stack-seaweedfs")
 
     def deploy_compose(self, *, compose_id: str, title: str | None, description: str | None):
         del title, description
@@ -345,7 +352,7 @@ def test_install_reconciles_seaweedfs_pack_via_dokploy_backend(
     client = FakeDokployApiClient()
     monkeypatch.setattr(
         "dokploy_wizard.dokploy.seaweedfs._local_https_health_check",
-        lambda url: url == "https://s3.example.com/status",
+        lambda url: url == "https://seaweedfs-stack-s3.internal/status",
     )
 
     summary = run_install_flow(
@@ -390,7 +397,7 @@ def test_install_reconciles_seaweedfs_pack_via_dokploy_backend(
             api_key="dokp-key-123",
             state_dir=state_dir,
             stack_name=desired_state.stack_name,
-            hostname=desired_state.hostnames["s3"],
+            hostname=internal_s3_hostname(desired_state.stack_name),
             access_key="seaweed-access",
             secret_key="seaweed-secret",
             client=client,

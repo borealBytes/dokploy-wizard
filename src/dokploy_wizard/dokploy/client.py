@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -23,11 +24,25 @@ DeleteScheduleSessionFallbackFn = Callable[[str], Any]
 AiProvidersAllSessionFallbackFn = Callable[[], Any]
 AiProviderCreateSessionFallbackFn = Callable[[str, str, str, str, bool], Any]
 AiProviderUpdateSessionFallbackFn = Callable[[str, str, str, str, str, bool], Any]
+AiProviderDeleteSessionFallbackFn = Callable[[str], Any]
 AiProviderTestConnectionSessionFallbackFn = Callable[[str, str, str], Any]
+
+_DOKPLOY_429_MAX_RETRIES = 3
+_DOKPLOY_429_FALLBACK_DELAY_SECONDS = 5.0
+_DOKPLOY_429_MAX_DELAY_SECONDS = 30.0
 
 
 class DokployApiError(RuntimeError):
     """Raised when Dokploy API requests fail."""
+
+
+def _retry_after_seconds(exc: error.HTTPError) -> float:
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    try:
+        seconds = float(header)
+    except (TypeError, ValueError):
+        seconds = _DOKPLOY_429_FALLBACK_DELAY_SECONDS
+    return min(max(seconds, 0.5), _DOKPLOY_429_MAX_DELAY_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -119,6 +134,7 @@ class DokployApiClient:
         ai_providers_all_session_fallback: AiProvidersAllSessionFallbackFn | None = None,
         ai_provider_create_session_fallback: AiProviderCreateSessionFallbackFn | None = None,
         ai_provider_update_session_fallback: AiProviderUpdateSessionFallbackFn | None = None,
+        ai_provider_delete_session_fallback: AiProviderDeleteSessionFallbackFn | None = None,
         ai_provider_test_connection_session_fallback: (
             AiProviderTestConnectionSessionFallbackFn | None
         ) = None,
@@ -138,6 +154,7 @@ class DokployApiClient:
         self._ai_providers_all_session_fallback = ai_providers_all_session_fallback
         self._ai_provider_create_session_fallback = ai_provider_create_session_fallback
         self._ai_provider_update_session_fallback = ai_provider_update_session_fallback
+        self._ai_provider_delete_session_fallback = ai_provider_delete_session_fallback
         self._ai_provider_test_connection_session_fallback = (
             ai_provider_test_connection_session_fallback
         )
@@ -473,6 +490,7 @@ class DokployApiClient:
                     "model": model,
                     "isEnabled": is_enabled,
                 },
+                allow_scalar=True,
             )
         except DokployApiError as error:
             if self._ai_provider_create_session_fallback is None or not _is_unauthorized_error(
@@ -488,9 +506,19 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        if not isinstance(payload, dict):
-            raise DokployApiError("Dokploy ai.create response must be an object.")
-        return _parse_ai_provider(payload)
+        if isinstance(payload, dict):
+            return _parse_ai_provider(payload)
+        # Current upstream ai.create mutates the row and answers with an empty
+        # array (or a scalar), so the record itself must be recovered from
+        # ai.getAll. apiKey is never echoed back by upstream reads, so the
+        # recovery match ignores it.
+        return self._recover_ai_provider(
+            operation="ai.create",
+            name=name,
+            api_url=api_url,
+            model=model,
+            is_enabled=is_enabled,
+        )
 
     def ai_provider_update(
         self,
@@ -514,6 +542,7 @@ class DokployApiClient:
                     "model": model,
                     "isEnabled": is_enabled,
                 },
+                allow_scalar=True,
             )
         except DokployApiError as error:
             if self._ai_provider_update_session_fallback is None or not _is_unauthorized_error(
@@ -530,9 +559,61 @@ class DokployApiClient:
             )
             if isinstance(payload, dict):
                 payload = payload.get("data", payload)
-        if not isinstance(payload, dict):
-            raise DokployApiError("Dokploy ai.update response must be an object.")
-        return _parse_ai_provider(payload)
+        if isinstance(payload, dict):
+            return _parse_ai_provider(payload)
+        return self._recover_ai_provider(
+            operation="ai.update",
+            ai_id=ai_id,
+            name=name,
+            api_url=api_url,
+            model=model,
+            is_enabled=is_enabled,
+        )
+
+    def _recover_ai_provider(
+        self,
+        *,
+        operation: str,
+        name: str,
+        api_url: str,
+        model: str,
+        is_enabled: bool,
+        ai_id: str | None = None,
+    ) -> DokployAiProvider:
+        matches = [
+            provider
+            for provider in self.ai_providers_all()
+            if provider.name == name
+            and provider.api_url == api_url
+            and provider.model == model
+            and provider.is_enabled == is_enabled
+            and (ai_id is None or provider.ai_id == ai_id)
+        ]
+        if len(matches) != 1:
+            raise DokployApiError(
+                f"Dokploy {operation} succeeded but provider recovery found "
+                f"{len(matches)} matching records."
+            )
+        return matches[0]
+
+    def ai_provider_delete(self, *, ai_id: str) -> None:
+        try:
+            payload = self._request_json(
+                "POST", "/api/ai.delete", {"aiId": ai_id}, allow_scalar=True
+            )
+        except DokployApiError as error:
+            if self._ai_provider_delete_session_fallback is None or not _is_unauthorized_error(
+                error
+            ):
+                raise
+            payload = self._ai_provider_delete_session_fallback(ai_id)
+            if isinstance(payload, dict):
+                payload = payload.get("data", payload)
+        if payload is not True:
+            # Anything but a bare ``true`` (false, null, an object) means the
+            # row was not removed; the reconciliation lists providers before
+            # deleting, so a missing row never reaches this call.
+            raise DokployApiError("Dokploy ai.delete response must be true.")
 
 
     def ai_provider_test_connection(
@@ -551,7 +632,9 @@ class DokployApiClient:
             payload = payload.get("data", payload)
         return _parse_ai_provider_test_connection_result(payload)
 
-    def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
+    def _request_json(
+        self, method: str, path: str, payload: Any | None = None, *, allow_scalar: bool = False
+    ) -> Any:
         data = None
         headers = {
             "Accept": "application/json",
@@ -566,20 +649,39 @@ class DokployApiClient:
             headers=headers,
             data=data,
         )
-        try:
-            response = self._request_fn(req)
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise DokployApiError(
-                f"Dokploy API request failed with status {exc.code}: {body or exc.reason}."
-            ) from exc
-        except error.URLError as exc:
-            raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
+        for attempt in range(_DOKPLOY_429_MAX_RETRIES + 1):
+            try:
+                response = self._request_fn(req)
+                break
+            except error.HTTPError as exc:
+                if exc.code != 429 or attempt == _DOKPLOY_429_MAX_RETRIES:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    raise DokployApiError(
+                        f"Dokploy API request failed with status {exc.code}: {body or exc.reason}."
+                    ) from exc
+                # Dokploy (better-auth) answers 429 with Retry-After when a
+                # limiter trips; a cold reconcile can burst through the core
+                # auth limiter and recover in seconds, so a small bounded
+                # backoff beats failing a whole install on a transient.
+                retry_after = _retry_after_seconds(exc)
+                # Drain and close before sleeping: HTTPError carries the open
+                # response, and holding it across the backoff keeps the socket
+                # pinned for GC-dependent cleanup instead of deterministic.
+                try:
+                    exc.read()
+                finally:
+                    exc.close()
+                time.sleep(retry_after)
+            except error.URLError as exc:
+                raise DokployApiError(f"Dokploy API request failed: {exc.reason}.") from exc
         if isinstance(response, list):
             return response
-        if not isinstance(response, dict):
-            raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
-        return response.get("data", response)
+        if isinstance(response, dict):
+            return response.get("data", response)
+        if allow_scalar:
+            # tRPC mutations like ai.delete resolve to a bare JSON boolean.
+            return response
+        raise DokployApiError("Dokploy API response must decode to a JSON object or array.")
 
 
 def _default_request(req: request.Request) -> Any:
@@ -700,7 +802,10 @@ def _parse_ai_provider(payload: Any) -> DokployAiProvider:
         ai_id=_require_string(payload, "aiId"),
         name=_require_string(payload, "name"),
         api_url=_require_string(payload, "apiUrl"),
-        api_key=_require_string(payload, "apiKey"),
+        # Current upstream ai.getAll selects the row without apiKey, so a missing
+        # or blank key means "hidden", not "unset"; callers must not treat it as
+        # evidence of drift.
+        api_key=payload.get("apiKey") if isinstance(payload.get("apiKey"), str) else "",
         model=_require_string(payload, "model"),
         is_enabled=is_enabled,
     )

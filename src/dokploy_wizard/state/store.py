@@ -19,15 +19,17 @@ from dokploy_wizard.state.models import (
     LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES,
     SEAWEEDFS_GENERATED_SECRET_PREFIXES,
     STATE_FORMAT_VERSION,
-    SURFSENSE_GENERATED_SECRET_PREFIXES,
     AppliedStateCheckpoint,
     DesiredState,
+    FilexProvisionerState,
+    GiteaIdentityLedger,
+    GiteaProvisionerState,
     LiteLLMGeneratedKeys,
+    LiteLLMImagePin,
     OwnershipLedger,
     RawEnvInput,
     SeaweedFsGeneratedSecrets,
     StateValidationError,
-    SurfSenseGeneratedSecrets,
     litellm_key_uses_virtual_key_format,
 )
 from dokploy_wizard.state.queue_models import (
@@ -48,13 +50,41 @@ INBOX_EVENTS_FILE = "inbox-events.json"
 JOB_QUEUE_FILE = "job-queue.json"
 OUTBOUND_DELIVERIES_FILE = "outbound-deliveries.json"
 LITELLM_GENERATED_KEYS_FILE = "litellm-generated-keys.json"
-SURFSENSE_GENERATED_SECRETS_FILE = "surfsense-generated-secrets.json"
+LITELLM_IMAGE_PIN_FILE = "litellm-image-pin.json"
 SEAWEEDFS_GENERATED_SECRETS_FILE = "seaweedfs-generated-secrets.json"
+FILEX_PROVISIONER_FILE = "filex-provisioner.json"
+FILEX_OFFICE_JWT_FILE = "filex-office-jwt.json"
+GITEA_PROVISIONER_FILE = "gitea-provisioner.json"
+GITEA_IDENTITIES_FILE = "gitea-identities.json"
+# Redacted inspection report kept beside (never inside) the lifecycle docs:
+# inspect-state must not mutate the canonical raw-input/desired-state pair the
+# uninstall fingerprint gate compares against.
+INSPECTION_SNAPSHOT_FILE = "inspection-snapshot.json"
 STATE_DOCUMENT_FILES = (
     RAW_INPUT_FILE,
     DESIRED_STATE_FILE,
     APPLIED_STATE_FILE,
     OWNERSHIP_LEDGER_FILE,
+)
+# Pack and runtime documents written after the lifecycle core. The tuple
+# above is the canonical fingerprint inventory the install/modify/inspect
+# flows read as a set; this one is the teardown remainder: full removal must
+# erase every document, not just the core four. Measured on the zero-state
+# loop — a destroy-mode uninstall reported "state_cleared": true while the
+# state dir kept a stale gitea-provisioner.json (mtime predated the
+# install by hours): the next from-zero pass read the dead token, burned
+# its verification, and the coder phase's identity syncs died at 401 on it.
+PACK_STATE_DOCUMENT_FILES = (
+    INBOX_EVENTS_FILE,
+    JOB_QUEUE_FILE,
+    OUTBOUND_DELIVERIES_FILE,
+    LITELLM_GENERATED_KEYS_FILE,
+    LITELLM_IMAGE_PIN_FILE,
+    SEAWEEDFS_GENERATED_SECRETS_FILE,
+    FILEX_PROVISIONER_FILE,
+    FILEX_OFFICE_JWT_FILE,
+    GITEA_PROVISIONER_FILE,
+    GITEA_IDENTITIES_FILE,
 )
 
 _DocumentT = TypeVar("_DocumentT")
@@ -438,7 +468,7 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     return LoadedState(
         raw_input=_load_optional_document(state_dir / RAW_INPUT_FILE, RawEnvInput.from_dict),
         desired_state=_load_optional_document(
-            state_dir / DESIRED_STATE_FILE, _load_desired_state_with_legacy_sanitization
+            state_dir / DESIRED_STATE_FILE, DesiredState.from_dict
         ),
         applied_state=_load_optional_document(
             state_dir / APPLIED_STATE_FILE,
@@ -451,35 +481,28 @@ def load_state_dir(state_dir: Path) -> LoadedState:
     )
 
 
-def _load_desired_state_with_legacy_sanitization(payload: dict[str, Any]) -> DesiredState:
-    try:
-        return DesiredState.from_dict(payload)
-    except StateValidationError as error:
-        if not _is_legacy_disabled_openclaw_gateway_token_state(payload, error):
-            raise
-        sanitized_payload = dict(payload)
-        sanitized_payload["openclaw_gateway_token"] = None
-        return DesiredState.from_dict(sanitized_payload)
-
-
-def _is_legacy_disabled_openclaw_gateway_token_state(
-    payload: dict[str, Any], error: StateValidationError
-) -> bool:
-    if str(error) != "OpenClaw gateway token must be omitted when the OpenClaw pack is disabled.":
-        return False
-    enabled_packs = payload.get("enabled_packs")
-    if not isinstance(enabled_packs, list) or "openclaw" in enabled_packs:
-        return False
-    token = payload.get("openclaw_gateway_token")
-    return isinstance(token, str) and token != ""
-
-
 def write_inspection_snapshot(
     state_dir: Path, raw_input: RawEnvInput, desired_state_snapshot: dict[str, Any]
 ) -> None:
+    """Persist the redacted inspection report WITHOUT touching lifecycle truth.
+
+    This used to overwrite the canonical ``raw-input.json`` / ``desired-state.json``
+    with redacted report values. The uninstall gate compares the applied-state
+    fingerprint against the persisted desired-state document, so once any
+    inspect-state run stamped ``<REDACTED>`` over the real secrets the gate could
+    never pass again — every remote install/modify flow runs inspect-state, so
+    uninstall was permanently disabled on every remotely managed box (measured).
+    The snapshot now rides a dedicated document; the lifecycle docs stay exactly
+    as the engine wrote them.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
-    _write_document(state_dir / RAW_INPUT_FILE, raw_input.to_dict())
-    _write_document(state_dir / DESIRED_STATE_FILE, redact_data(desired_state_snapshot))
+    _write_document(
+        state_dir / INSPECTION_SNAPSHOT_FILE,
+        {
+            "raw_input": raw_input.to_dict(),
+            "desired_state": redact_data(desired_state_snapshot),
+        },
+    )
 
 
 def load_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys | None:
@@ -496,6 +519,20 @@ def write_litellm_generated_keys(state_dir: Path, generated_keys: LiteLLMGenerat
     path.chmod(0o600)
 
 
+def load_litellm_image_pin(state_dir: Path) -> LiteLLMImagePin | None:
+    return _load_optional_document(
+        state_dir / LITELLM_IMAGE_PIN_FILE,
+        LiteLLMImagePin.from_dict,
+    )
+
+
+def write_litellm_image_pin(state_dir: Path, pin: LiteLLMImagePin) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / LITELLM_IMAGE_PIN_FILE
+    _write_document(path, pin.to_dict())
+    path.chmod(0o600)
+
+
 def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     existing = load_litellm_generated_keys(state_dir)
     if existing is not None:
@@ -509,33 +546,72 @@ def ensure_litellm_generated_keys(state_dir: Path) -> LiteLLMGeneratedKeys:
     return generated_keys
 
 
-def load_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets | None:
+def load_filex_provisioner(state_dir: Path) -> FilexProvisionerState | None:
     return _load_optional_document(
-        state_dir / SURFSENSE_GENERATED_SECRETS_FILE,
-        SurfSenseGeneratedSecrets.from_dict,
+        state_dir / FILEX_PROVISIONER_FILE,
+        FilexProvisionerState.from_dict,
     )
 
 
-def write_surfsense_generated_secrets(
-    state_dir: Path, generated_secrets: SurfSenseGeneratedSecrets
-) -> None:
+def write_filex_provisioner(state_dir: Path, provisioner: FilexProvisionerState) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / SURFSENSE_GENERATED_SECRETS_FILE
-    _write_document(path, generated_secrets.to_dict())
+    path = state_dir / FILEX_PROVISIONER_FILE
+    _write_document(path, provisioner.to_dict())
     path.chmod(0o600)
 
 
-def ensure_surfsense_generated_secrets(state_dir: Path) -> SurfSenseGeneratedSecrets:
-    existing = load_surfsense_generated_secrets(state_dir)
-    if existing is not None:
-        repaired_existing = _repair_surfsense_generated_secrets(existing)
-        if repaired_existing != existing:
-            write_surfsense_generated_secrets(state_dir, repaired_existing)
-        return repaired_existing
+def load_filex_office_jwt(state_dir: Path) -> dict[str, Any] | None:
+    """The ONLYOFFICE sidecar JWT document, as stored (or None when absent)."""
 
-    generated_secrets = _build_surfsense_generated_secrets()
-    write_surfsense_generated_secrets(state_dir, generated_secrets)
-    return generated_secrets
+    return _load_optional_document(state_dir / FILEX_OFFICE_JWT_FILE, lambda payload: payload)
+
+
+def write_filex_office_jwt(state_dir: Path, *, jwt_secret: str) -> dict[str, Any]:
+    """Persist the sidecar JWT secret at 0600 and return the stored document.
+
+    The value itself is derived deterministically from the stack name (see the
+    filex backend); the document exists for operator visibility and as the
+    rotation record, the same role the provisioner document plays for the lane
+    token.
+    """
+
+    document = {
+        "format_version": STATE_FORMAT_VERSION,
+        "jwt_secret": jwt_secret,
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / FILEX_OFFICE_JWT_FILE
+    _write_document(path, document)
+    path.chmod(0o600)
+    return document
+
+
+def load_gitea_provisioner(state_dir: Path) -> GiteaProvisionerState | None:
+    return _load_optional_document(
+        state_dir / GITEA_PROVISIONER_FILE,
+        GiteaProvisionerState.from_dict,
+    )
+
+
+def write_gitea_provisioner(state_dir: Path, provisioner: GiteaProvisionerState) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / GITEA_PROVISIONER_FILE
+    _write_document(path, provisioner.to_dict())
+    path.chmod(0o600)
+
+
+def load_gitea_identities(state_dir: Path) -> GiteaIdentityLedger | None:
+    return _load_optional_document(
+        state_dir / GITEA_IDENTITIES_FILE,
+        GiteaIdentityLedger.from_dict,
+    )
+
+
+def write_gitea_identities(state_dir: Path, ledger: GiteaIdentityLedger) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / GITEA_IDENTITIES_FILE
+    _write_document(path, ledger.to_dict())
+    path.chmod(0o600)
 
 
 def load_seaweedfs_generated_secrets(state_dir: Path) -> SeaweedFsGeneratedSecrets | None:
@@ -579,16 +655,6 @@ def _build_litellm_generated_keys() -> LiteLLMGeneratedKeys:
     )
 
 
-def _build_surfsense_generated_secrets() -> SurfSenseGeneratedSecrets:
-    return SurfSenseGeneratedSecrets(
-        format_version=STATE_FORMAT_VERSION,
-        secrets={
-            secret_name: _generate_secret(prefix=prefix)
-            for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items()
-        },
-    )
-
-
 def _build_seaweedfs_generated_secrets() -> SeaweedFsGeneratedSecrets:
     return SeaweedFsGeneratedSecrets(
         format_version=STATE_FORMAT_VERSION,
@@ -606,7 +672,14 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
     if not litellm_key_uses_virtual_key_format(master_key):
         master_key = _generate_secret(prefix=LITELLM_GENERATED_MASTER_KEY_PREFIX)
 
-    virtual_keys = dict(existing.virtual_keys)
+    # Prune entries for consumers the wizard no longer provisions (retired
+    # packs); keeping them would hand ghost names to the gateway key sync and
+    # to the model-sync sidecar forever.
+    virtual_keys = {
+        name: value
+        for name, value in existing.virtual_keys.items()
+        if name in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES
+    }
     for consumer, prefix in LITELLM_GENERATED_VIRTUAL_KEY_PREFIXES.items():
         current_key = virtual_keys.get(consumer)
         if current_key is not None and litellm_key_uses_virtual_key_format(current_key):
@@ -618,20 +691,6 @@ def _repair_litellm_generated_keys(existing: LiteLLMGeneratedKeys) -> LiteLLMGen
         master_key=master_key,
         salt_key=existing.salt_key,
         virtual_keys=virtual_keys,
-    )
-
-
-def _repair_surfsense_generated_secrets(
-    existing: SurfSenseGeneratedSecrets,
-) -> SurfSenseGeneratedSecrets:
-    secrets_by_name = dict(existing.secrets)
-    for secret_name, prefix in SURFSENSE_GENERATED_SECRET_PREFIXES.items():
-        if secrets_by_name.get(secret_name):
-            continue
-        secrets_by_name[secret_name] = _generate_secret(prefix=prefix)
-    return SurfSenseGeneratedSecrets(
-        format_version=existing.format_version,
-        secrets=secrets_by_name,
     )
 
 
@@ -716,17 +775,19 @@ def _validate_state_document_set(loaded_state: LoadedState) -> None:
         "dokploy_bootstrap",
         "networking",
         "shared_core",
-        "surfsense",
         "seaweedfs",
         "headscale",
         "tailscale",
         "matrix",
+        # Legacy: boxes installed while the Nextcloud pack existed carry the
+        # step in their checkpoint. The pack is gone; the name stays legal so
+        # their modify passes load without tripping the unsupported-step guard.
         "nextcloud",
         "moodle",
         "docuseal",
+        "filex",
+        "gitea",
         "coder",
-        "openclaw",
-        "my-farm-advisor",
         "cloudflare_access",
     }
     unexpected_steps = sorted(
@@ -813,7 +874,7 @@ def write_outbound_delivery_log(state_dir: Path, delivery_log: OutboundDeliveryL
 def clear_state_documents(state_dir: Path) -> None:
     """Remove all persisted state documents together after full teardown."""
 
-    for file_name in STATE_DOCUMENT_FILES:
+    for file_name in (*STATE_DOCUMENT_FILES, *PACK_STATE_DOCUMENT_FILES, INSPECTION_SNAPSHOT_FILE):
         document_path = state_dir / file_name
         if document_path.exists():
             document_path.unlink()
