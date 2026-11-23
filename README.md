@@ -397,7 +397,7 @@ sequenceDiagram
     Op->>CD: start their workspace
     CD->>TF: terraform apply (volume + agent)
     Note over TF,LT: workspace boot — claim and adopt, no account surprise
-    TF->>GT: claim the pre-stood account; re-enable if the person returned
+    TF->>GT: claim the pre-stood account, re-enable if the person returned
     TF->>GT: password re-sync only for the deployer's own login
     TF->>FX: per-(user, workspace) S3 key minted
     TF->>LT: POST /key/generate → child key "<login>-<workspace>"
